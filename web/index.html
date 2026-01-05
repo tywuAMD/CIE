@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AMD Platform Reservation System</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>AMD Platform Reservation System</h1>
+        </header>
+
+        <main>
+            <!-- Platform Selection -->
+            <section class="platform-section">
+                <h2>Select Platform</h2>
+                <div class="platform-selector" id="platformSelector">
+                    <!-- Platforms will be dynamically generated -->
+                </div>
+            </section>
+
+            <!-- Date Selection -->
+            <section class="date-section">
+                <h2>Select Date</h2>
+                <div class="date-picker">
+                    <input type="date" id="dateInput" min="" value="">
+                </div>
+            </section>
+
+            <!-- Reservation Details -->
+            <section class="reservation-section" id="reservationSection" style="display: none;">
+                <h2>Reservation Details</h2>
+                
+                <!-- Time Slots Visualization -->
+                <div class="timeline-container" id="timelineContainer">
+                    <!-- 24-hour timeline will be dynamically generated -->
+                </div>
+
+                <!-- Time and Duration Selection -->
+                <div class="time-duration-selection">
+                    <div class="time-duration-inputs">
+                        <div class="form-group">
+                            <label for="startTime">Start Time *</label>
+                            <input type="time" id="startTime" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="duration">Duration (hours) *</label>
+                            <select id="duration" required>
+                                <option value="">Select duration</option>
+                                <option value="1">1 hour</option>
+                                <option value="2">2 hours</option>
+                                <option value="3">3 hours</option>
+                                <option value="4">4 hours</option>
+                                <option value="5">5 hours</option>
+                                <option value="6">6 hours</option>
+                            </select>
+                        </div>
+                    </div>
+                    <button type="button" class="btn btn-primary" id="makeReservationBtn">Make Reservation</button>
+                    <div id="availabilityMessage" class="availability-message"></div>
+                </div>
+            </section>
+
+            <!-- Confirmation Modal -->
+            <div class="confirmation-modal" id="confirmationModal">
+                <div class="modal-content confirmation-content">
+                    <h2>Confirm Your Reservation</h2>
+                    <div id="confirmationDetails" class="confirmation-details"></div>
+                    
+                    <form id="reservationForm">
+                        <div class="form-group">
+                            <label for="name">Full Name *</label>
+                            <input type="text" id="name" required placeholder="Enter your name">
+                        </div>
+                        <div class="form-group">
+                            <label for="email">Email *</label>
+                            <input type="email" id="email" required placeholder="Enter your email">
+                        </div>
+                        <div class="form-group">
+                            <label for="phone">Phone Number</label>
+                            <input type="tel" id="phone" placeholder="Enter your phone number">
+                        </div>
+                        <div class="form-group">
+                            <label for="notes">Additional Notes</label>
+                            <textarea id="notes" rows="3" placeholder="Any special requirements?"></textarea>
+                        </div>
+                        <div class="form-actions">
+                            <button type="button" class="btn btn-secondary" id="cancelConfirmBtn">Cancel</button>
+                            <button type="submit" class="btn btn-primary">Confirm Reservation</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+            <!-- Success Message -->
+            <div class="success-modal" id="successModal">
+                <div class="modal-content">
+                    <div class="success-icon">✓</div>
+                    <h2>Reservation Confirmed!</h2>
+                    <p id="confirmationMessage"></p>
+                    <button class="btn btn-primary" id="closeModal">Make Another Reservation</button>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
+
