@@ -2,22 +2,49 @@
 
 class ReservationSystem {
     constructor() {
-        this.platforms = ['W7900D']; // Available platforms
+        this.apiBaseUrl = window.RESERVATION_API_BASE_URL || 'http://localhost:4100/api';
+        this.authMode = 'login';
+        this.currentUser = null;
+        this.platforms = [];
         this.selectedPlatform = null;
         this.selectedDate = null;
         this.selectedStartTime = null;
         this.selectedDuration = null;
-        this.reservations = this.loadReservations();
-        
-        this.init();
+        this.pendingSlotStartTime = null;
+        this.reservations = [];
+        this.selectedDayReservations = [];
+        this.selectedDayBookedHours = new Set();
+        this.isLoadingAvailability = false;
+        this.availabilityRequestId = 0;
+
+        this.init().catch((error) => {
+            console.error('Initialization error:', error);
+            this.showLoginScreen(`Initialization failed: ${error.message}`);
+        });
     }
 
-    init() {
+    async init() {
         this.resetFormInputs();
-        this.renderPlatforms();
+        this.renderPlatformsLoadingState();
         this.setupEventListeners();
         this.setDateConstraints();
         this.updateReservationSectionVisibility();
+        this.updateQuickDateButtonState();
+        this.updateSelectionSummary();
+        this.updateActionState();
+
+        const existingUser = await this.fetchCurrentUser();
+        if (!existingUser) {
+            this.showLoginScreen();
+            return;
+        }
+
+        this.currentUser = existingUser;
+        await this.bootstrapAppData();
+        if (!this.currentUser) {
+            return;
+        }
+        this.showAppScreen();
     }
 
     resetFormInputs() {
@@ -27,9 +54,319 @@ class ReservationSystem {
         document.getElementById('duration').value = '';
     }
 
+    renderPlatformsLoadingState() {
+        const container = document.getElementById('platformSelector');
+        if (!container) return;
+        container.innerHTML = '<p class="empty-state">Loading platforms...</p>';
+    }
+
+    showSyncError(messageText) {
+        if (!this.currentUser) {
+            this.setLoginMessage(messageText, 'error');
+            return;
+        }
+
+        const message = document.getElementById('availabilityMessage');
+        if (!message) return;
+        message.className = 'availability-message unavailable';
+        message.textContent = messageText;
+    }
+
+    setLoginMessage(messageText = '', type = '') {
+        const message = document.getElementById('loginMessage');
+        if (!message) return;
+        message.className = `auth-message${type ? ` ${type}` : ''}`;
+        message.textContent = messageText;
+    }
+
+    showLoginScreen(messageText = '', messageType = '', mode = 'login') {
+        const authScreen = document.getElementById('authScreen');
+        const appContainer = document.getElementById('appContainer');
+
+        if (authScreen) {
+            authScreen.classList.remove('hidden');
+        }
+        if (appContainer) {
+            appContainer.classList.add('hidden');
+        }
+
+        this.setAuthMode(mode);
+
+        if (messageText) {
+            this.setLoginMessage(messageText, messageType || 'error');
+        } else {
+            this.setLoginMessage('');
+        }
+    }
+
+    setAuthMode(mode = 'login') {
+        const normalizedMode = mode === 'reset' ? 'reset' : 'login';
+        this.authMode = normalizedMode;
+
+        const title = document.getElementById('authTitle');
+        const hint = document.getElementById('authHint');
+        const loginForm = document.getElementById('loginForm');
+        const resetPasswordForm = document.getElementById('resetPasswordForm');
+        const authSwitch = document.querySelector('.auth-switch');
+        const showLoginBtn = document.getElementById('showLoginBtn');
+        const showResetPasswordBtn = document.getElementById('showResetPasswordBtn');
+
+        if (title) {
+            title.textContent = normalizedMode === 'reset' ? 'Reset Password' : 'Team Login';
+        }
+
+        if (hint) {
+            hint.textContent = normalizedMode === 'reset'
+                ? 'Use your assigned username and current password to set a new password.'
+                : 'Please sign in with your team account to make reservations.';
+        }
+
+        if (loginForm) {
+            loginForm.classList.toggle('hidden', normalizedMode !== 'login');
+        }
+
+        if (resetPasswordForm) {
+            resetPasswordForm.classList.toggle('hidden', normalizedMode !== 'reset');
+        }
+
+        if (showLoginBtn) {
+            const isActive = normalizedMode === 'login';
+            showLoginBtn.classList.toggle('active', isActive);
+            showLoginBtn.setAttribute('aria-selected', String(isActive));
+        }
+
+        if (showResetPasswordBtn) {
+            const isActive = normalizedMode === 'reset';
+            showResetPasswordBtn.classList.toggle('active', isActive);
+            showResetPasswordBtn.setAttribute('aria-selected', String(isActive));
+        }
+
+        if (authSwitch) {
+            authSwitch.classList.toggle('alt-active', normalizedMode === 'reset');
+        }
+
+        const focusId = normalizedMode === 'reset' ? 'resetUsername' : 'loginUsername';
+        const input = document.getElementById(focusId);
+        if (input) {
+            input.focus();
+        }
+    }
+
+    showAppScreen() {
+        const authScreen = document.getElementById('authScreen');
+        const appContainer = document.getElementById('appContainer');
+
+        if (authScreen) {
+            authScreen.classList.add('hidden');
+        }
+        if (appContainer) {
+            appContainer.classList.remove('hidden');
+        }
+
+        this.setLoginMessage('');
+        this.updateCurrentUserLabel();
+    }
+
+    updateCurrentUserLabel() {
+        const userLabel = document.getElementById('currentUserLabel');
+        if (!userLabel) return;
+
+        if (!this.currentUser) {
+            userLabel.textContent = 'Not signed in';
+            this.updateReservationsScopeHint();
+            return;
+        }
+
+        const roleSuffix = this.currentUser.role === 'admin' ? ' (Admin)' : '';
+        userLabel.textContent = `${this.currentUser.username}${roleSuffix}`;
+        this.updateReservationsScopeHint();
+    }
+
+    updateReservationsScopeHint() {
+        const hint = document.getElementById('reservationsScopeHint');
+        if (!hint) return;
+
+        if (!this.currentUser) {
+            hint.textContent = 'Reservations appear after login.';
+            return;
+        }
+
+        if (this.currentUser.role === 'admin') {
+            hint.textContent = 'Admin view: all teams\' reservations are listed here and can be canceled.';
+            return;
+        }
+
+        hint.textContent = 'Your team reservations appear here and can be canceled anytime.';
+    }
+
+    handleUnauthorized(error) {
+        if (!error || error.status !== 401) {
+            return false;
+        }
+
+        this.currentUser = null;
+        this.showLoginScreen('Session expired. Please log in again.', 'error');
+        return true;
+    }
+
+    async apiRequest(path, options = {}) {
+        const response = await fetch(`${this.apiBaseUrl}${path}`, {
+            credentials: 'include',
+            headers: {
+                'Content-Type': 'application/json',
+                ...(options.headers || {})
+            },
+            ...options
+        });
+
+        let payload = null;
+        if (response.status !== 204) {
+            payload = await response.json().catch(() => null);
+        }
+
+        if (!response.ok) {
+            const errorMessage = payload?.error || `Request failed (${response.status})`;
+            const requestError = new Error(errorMessage);
+            requestError.status = response.status;
+            requestError.payload = payload;
+            throw requestError;
+        }
+
+        return payload;
+    }
+
+    async fetchCurrentUser() {
+        try {
+            const payload = await this.apiRequest('/auth/me');
+            return payload?.user || null;
+        } catch (error) {
+            if (error.status === 401) {
+                return null;
+            }
+            throw error;
+        }
+    }
+
+    async bootstrapAppData() {
+        this.renderPlatformsLoadingState();
+        try {
+            await this.cleanupExpiredReservations();
+            await Promise.all([
+                this.loadPlatformsFromApi(),
+                this.syncReservationsFromApi()
+            ]);
+            this.renderPlatforms();
+            this.updateCurrentUserLabel();
+        } catch (error) {
+            if (this.handleUnauthorized(error)) {
+                return;
+            }
+            throw error;
+        }
+    }
+
+    async loadPlatformsFromApi() {
+        const payload = await this.apiRequest('/platforms');
+        this.platforms = (payload?.platforms || []).map((platform) => platform.name);
+    }
+
+    async cleanupExpiredReservations() {
+        try {
+            const payload = await this.apiRequest('/reservations/cleanup-expired', {
+                method: 'POST'
+            });
+            return payload?.deletedCount || 0;
+        } catch (error) {
+            if (this.handleUnauthorized(error)) {
+                return 0;
+            }
+            throw error;
+        }
+    }
+
+    async syncReservationsFromApi(filters = {}) {
+        const query = new URLSearchParams();
+        if (filters.platform) query.set('platform', filters.platform);
+        if (filters.date) query.set('date', filters.date);
+
+        const suffix = query.toString() ? `?${query.toString()}` : '';
+        const payload = await this.apiRequest(`/reservations${suffix}`);
+        this.reservations = payload?.reservations || [];
+        this.renderReservationsList();
+    }
+
+    async refreshSelectedAvailability(showErrorMessage = true) {
+        if (!this.currentUser) {
+            return false;
+        }
+
+        if (!this.selectedPlatform || !this.selectedDate) {
+            this.selectedDayReservations = [];
+            this.selectedDayBookedHours = new Set();
+            this.isLoadingAvailability = false;
+            this.updateTimeSlotSelection();
+            return true;
+        }
+
+        const requestId = ++this.availabilityRequestId;
+        this.isLoadingAvailability = true;
+        this.updateTimeSlotSelection();
+
+        try {
+            const query = new URLSearchParams({
+                platform: this.selectedPlatform,
+                date: this.selectedDate
+            });
+
+            const payload = await this.apiRequest(`/availability?${query.toString()}`);
+            if (requestId !== this.availabilityRequestId) {
+                return false;
+            }
+
+            const slots = payload?.slots || [];
+            this.selectedDayBookedHours = new Set(
+                slots
+                    .filter((slot) => slot.reserved)
+                    .map((slot) => Number(slot.hour))
+            );
+            this.selectedDayReservations = payload?.reservations || [];
+
+            this.isLoadingAvailability = false;
+            this.updateTimeSlotSelection();
+            this.updateSelectionSummary();
+            this.updateActionState();
+            return true;
+        } catch (error) {
+            if (requestId !== this.availabilityRequestId) {
+                return false;
+            }
+
+            if (this.handleUnauthorized(error)) {
+                return false;
+            }
+
+            this.selectedDayReservations = [];
+            this.selectedDayBookedHours = new Set();
+            this.isLoadingAvailability = false;
+            this.updateTimeSlotSelection();
+            this.updateSelectionSummary();
+            this.updateActionState();
+            if (showErrorMessage) {
+                this.showSyncError(`Unable to load availability: ${error.message}`);
+            }
+            return false;
+        }
+    }
+
     renderPlatforms() {
         const container = document.getElementById('platformSelector');
+        if (!container) return;
         container.innerHTML = '';
+
+        if (this.platforms.length === 0) {
+            container.innerHTML = '<p class="empty-state">No active platforms found in backend.</p>';
+            return;
+        }
 
         this.platforms.forEach(platform => {
             const card = document.createElement('div');
@@ -45,6 +382,14 @@ class ReservationSystem {
 
     selectPlatform(platform) {
         this.selectedPlatform = platform;
+        this.pendingSlotStartTime = null;
+        this.selectedStartTime = null;
+        this.selectedDuration = null;
+        this.selectedDayReservations = [];
+        this.selectedDayBookedHours = new Set();
+        this.isLoadingAvailability = Boolean(this.selectedDate);
+        document.getElementById('startTime').value = '';
+        document.getElementById('duration').value = '';
         
         // Update visual selection
         const cards = document.querySelectorAll('.platform-card');
@@ -59,9 +404,20 @@ class ReservationSystem {
         // Reset other selections and update visibility
         this.clearAvailabilityMessage();
         this.updateReservationSectionVisibility();
+        this.updateSelectionSummary();
+        this.updateActionState();
+
+        if (this.selectedDate) {
+            this.refreshSelectedAvailability();
+        }
     }
 
     setupEventListeners() {
+        const loginForm = document.getElementById('loginForm');
+        const resetPasswordForm = document.getElementById('resetPasswordForm');
+        const showLoginBtn = document.getElementById('showLoginBtn');
+        const showResetPasswordBtn = document.getElementById('showResetPasswordBtn');
+        const logoutBtn = document.getElementById('logoutBtn');
         const dateInput = document.getElementById('dateInput');
         const startTimeInput = document.getElementById('startTime');
         const durationInput = document.getElementById('duration');
@@ -70,6 +426,17 @@ class ReservationSystem {
         const cancelConfirmBtn = document.getElementById('cancelConfirmBtn');
         const closeModal = document.getElementById('closeModal');
 
+        loginForm.addEventListener('submit', (e) => this.handleLoginSubmit(e));
+        resetPasswordForm.addEventListener('submit', (e) => this.handleResetPasswordSubmit(e));
+        showLoginBtn.addEventListener('click', () => {
+            this.setAuthMode('login');
+            this.setLoginMessage('');
+        });
+        showResetPasswordBtn.addEventListener('click', () => {
+            this.setAuthMode('reset');
+            this.setLoginMessage('');
+        });
+        logoutBtn.addEventListener('click', () => this.handleLogout());
         dateInput.addEventListener('change', () => this.handleDateChange());
         startTimeInput.addEventListener('change', () => this.handleSelectionChange());
         durationInput.addEventListener('change', () => this.handleSelectionChange());
@@ -77,6 +444,29 @@ class ReservationSystem {
         form.addEventListener('submit', (e) => this.handleFormSubmit(e));
         cancelConfirmBtn.addEventListener('click', () => this.closeConfirmationModal());
         closeModal.addEventListener('click', () => this.closeSuccessModal());
+
+        const quickDateButtons = document.querySelectorAll('.quick-date-btn');
+        quickDateButtons.forEach(button => {
+            button.addEventListener('click', () => {
+                const offset = parseInt(button.dataset.offset, 10);
+                if (!Number.isNaN(offset)) {
+                    this.selectQuickDate(offset);
+                }
+            });
+        });
+
+        document.addEventListener('keydown', (event) => {
+            if (event.key !== 'Escape') return;
+
+            const confirmationModal = document.getElementById('confirmationModal');
+            const successModal = document.getElementById('successModal');
+
+            if (confirmationModal.classList.contains('show')) {
+                this.closeConfirmationModal();
+            } else if (successModal.classList.contains('show')) {
+                this.closeSuccessModal();
+            }
+        });
 
         // Close modals when clicking outside
         const confirmationModal = document.getElementById('confirmationModal');
@@ -94,16 +484,173 @@ class ReservationSystem {
         });
     }
 
+    async handleLoginSubmit(e) {
+        e.preventDefault();
+
+        const username = document.getElementById('loginUsername').value.trim();
+        const password = document.getElementById('loginPassword').value;
+        const loginButton = document.getElementById('loginBtn');
+
+        if (loginButton) {
+            loginButton.disabled = true;
+        }
+        this.setLoginMessage('Signing in...');
+
+        try {
+            const payload = await this.apiRequest('/auth/login', {
+                method: 'POST',
+                body: JSON.stringify({ username, password })
+            });
+
+            if (!payload?.user) {
+                throw new Error('Login response is invalid.');
+            }
+
+            this.currentUser = payload.user;
+            this.selectedPlatform = null;
+            this.selectedDate = null;
+            this.selectedDayReservations = [];
+            this.selectedDayBookedHours = new Set();
+            this.resetFormInputs();
+            await this.bootstrapAppData();
+            if (!this.currentUser) {
+                return;
+            }
+            this.showAppScreen();
+            document.getElementById('loginPassword').value = '';
+            this.updateReservationSectionVisibility();
+            this.updateSelectionSummary();
+            this.updateActionState();
+        } catch (error) {
+            this.currentUser = null;
+            this.showLoginScreen(`Login failed: ${error.message}`, 'error', 'login');
+        } finally {
+            if (loginButton) {
+                loginButton.disabled = false;
+            }
+        }
+    }
+
+    async handleResetPasswordSubmit(e) {
+        e.preventDefault();
+
+        const username = document.getElementById('resetUsername').value.trim();
+        const currentPassword = document.getElementById('resetCurrentPassword').value;
+        const newPassword = document.getElementById('resetNewPassword').value;
+        const confirmNewPassword = document.getElementById('resetNewPasswordConfirm').value;
+        const resetButton = document.getElementById('resetPasswordBtn');
+
+        if (newPassword !== confirmNewPassword) {
+            this.setLoginMessage('Password reset failed: new passwords do not match.', 'error');
+            return;
+        }
+
+        if (newPassword === currentPassword) {
+            this.setLoginMessage('Password reset failed: new password must be different.', 'error');
+            return;
+        }
+
+        if (resetButton) {
+            resetButton.disabled = true;
+        }
+        this.setLoginMessage('Updating password...');
+
+        try {
+            await this.apiRequest('/auth/reset-password', {
+                method: 'POST',
+                body: JSON.stringify({ username, currentPassword, newPassword })
+            });
+
+            document.getElementById('resetCurrentPassword').value = '';
+            document.getElementById('resetNewPassword').value = '';
+            document.getElementById('resetNewPasswordConfirm').value = '';
+
+            const loginUsername = document.getElementById('loginUsername');
+            if (loginUsername) {
+                loginUsername.value = username;
+            }
+            const loginPassword = document.getElementById('loginPassword');
+            if (loginPassword) {
+                loginPassword.value = '';
+            }
+
+            this.showLoginScreen('Password updated. Please log in with your new password.', 'success', 'login');
+        } catch (error) {
+            this.showLoginScreen(`Password reset failed: ${error.message}`, 'error', 'reset');
+        } finally {
+            if (resetButton) {
+                resetButton.disabled = false;
+            }
+        }
+    }
+
+    async handleLogout() {
+        try {
+            await this.apiRequest('/auth/logout', {
+                method: 'POST'
+            });
+        } catch (error) {
+            console.error('Logout request failed:', error);
+        }
+
+        this.currentUser = null;
+        this.platforms = [];
+        this.reservations = [];
+        this.selectedPlatform = null;
+        this.selectedDate = null;
+        this.selectedStartTime = null;
+        this.selectedDuration = null;
+        this.pendingSlotStartTime = null;
+        this.selectedDayReservations = [];
+        this.selectedDayBookedHours = new Set();
+        this.isLoadingAvailability = false;
+        this.availabilityRequestId += 1;
+
+        this.resetFormInputs();
+        this.renderPlatformsLoadingState();
+        this.renderReservationsList();
+        this.updateReservationSectionVisibility();
+        this.updateSelectionSummary();
+        this.updateActionState();
+        this.updateReservationsScopeHint();
+        this.showLoginScreen('Logged out successfully.', 'success');
+    }
+
     handleSelectionChange() {
+        const startTime = document.getElementById('startTime').value;
+        const duration = document.getElementById('duration').value;
+
+        if (!startTime || duration) {
+            this.pendingSlotStartTime = null;
+        } else if (this.pendingSlotStartTime) {
+            // Keep pending start in sync if user edits start time after first click
+            this.pendingSlotStartTime = startTime;
+        }
+
         this.clearAvailabilityMessage();
         this.updateTimeSlotSelection();
+        this.updateSelectionSummary();
+        this.updateActionState();
     }
 
     updateTimeSlotSelection() {
         const startTime = document.getElementById('startTime').value;
         const duration = document.getElementById('duration').value;
 
-        if (!startTime || !duration || !this.selectedPlatform || !this.selectedDate) {
+        if (!this.selectedPlatform || !this.selectedDate) {
+            this.renderTimeSlots();
+            return;
+        }
+
+        if (startTime && !duration && this.pendingSlotStartTime) {
+            const pendingStartHour = parseInt(this.pendingSlotStartTime.split(':')[0], 10);
+            if (!Number.isNaN(pendingStartHour)) {
+                this.renderTimeSlots([pendingStartHour], false, true);
+                return;
+            }
+        }
+
+        if (!startTime || !duration) {
             this.renderTimeSlots();
             return;
         }
@@ -135,7 +682,7 @@ class ReservationSystem {
         const hasConflict = conflicts.length > 0;
 
         // Re-render with selection
-        this.renderTimeSlots(affectedHours, hasConflict);
+        this.renderTimeSlots(affectedHours, hasConflict, false);
     }
 
     setDateConstraints() {
@@ -147,6 +694,7 @@ class ReservationSystem {
         
         // Don't set a default value - let it show placeholder
         this.selectedDate = null;
+        this.updateQuickDateButtonState();
     }
 
     updateReservationSectionVisibility() {
@@ -199,11 +747,282 @@ class ReservationSystem {
         return h * 60 + m;
     }
 
+    getReservationVisualState(reservation) {
+        if (!reservation?.date || !reservation?.time || !reservation?.duration) {
+            return 'upcoming';
+        }
+
+        const startTime = reservation.time.length === 5 ? reservation.time : reservation.time.slice(0, 5);
+        const start = new Date(`${reservation.date}T${startTime}:00`);
+        const durationHours = Number(reservation.duration);
+
+        if (Number.isNaN(start.getTime()) || !Number.isFinite(durationHours) || durationHours <= 0) {
+            return 'upcoming';
+        }
+
+        const end = new Date(start.getTime() + (durationHours * 60 * 60 * 1000));
+        const now = new Date();
+        return now >= start && now < end ? 'active' : 'upcoming';
+    }
+
+    isDateToday(dateString) {
+        if (!dateString) return false;
+        return dateString === this.formatDate(new Date());
+    }
+
+    isPastSlotHour(dateString, hour) {
+        if (!this.isDateToday(dateString)) return false;
+        const now = new Date();
+        return hour < now.getHours();
+    }
+
+    isPastStartTime(dateString, startTime) {
+        if (!dateString || !startTime) return false;
+        const startHour = parseInt(startTime.split(':')[0], 10);
+        if (Number.isNaN(startHour)) return false;
+        return this.isPastSlotHour(dateString, startHour);
+    }
+
+    selectQuickDate(offsetDays) {
+        const targetDate = new Date();
+        targetDate.setHours(0, 0, 0, 0);
+        targetDate.setDate(targetDate.getDate() + offsetDays);
+
+        const formattedDate = this.formatDate(targetDate);
+        const dateInput = document.getElementById('dateInput');
+        dateInput.value = formattedDate;
+        this.selectedDate = formattedDate;
+        this.pendingSlotStartTime = null;
+        this.selectedStartTime = null;
+        this.selectedDuration = null;
+        this.selectedDayReservations = [];
+        this.selectedDayBookedHours = new Set();
+        this.isLoadingAvailability = Boolean(this.selectedPlatform && this.selectedDate);
+        document.getElementById('startTime').value = '';
+        document.getElementById('duration').value = '';
+
+        this.clearAvailabilityMessage();
+        this.updateQuickDateButtonState();
+        this.updateReservationSectionVisibility();
+        this.updateSelectionSummary();
+        this.updateActionState();
+        this.refreshSelectedAvailability();
+    }
+
+    updateQuickDateButtonState() {
+        const dateInput = document.getElementById('dateInput');
+        const selectedDateValue = dateInput.value;
+        const quickDateButtons = document.querySelectorAll('.quick-date-btn');
+
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+
+        quickDateButtons.forEach(button => {
+            const offset = parseInt(button.dataset.offset, 10);
+            if (Number.isNaN(offset)) {
+                button.classList.remove('active');
+                button.setAttribute('aria-pressed', 'false');
+                return;
+            }
+
+            const buttonDate = new Date(today);
+            buttonDate.setDate(today.getDate() + offset);
+            const formattedButtonDate = this.formatDate(buttonDate);
+            const isActive = selectedDateValue === formattedButtonDate;
+            button.classList.toggle('active', isActive);
+            button.setAttribute('aria-pressed', String(isActive));
+        });
+    }
+
+    getSelectionStatus() {
+        const startTime = document.getElementById('startTime').value;
+        const durationValue = document.getElementById('duration').value;
+
+        if (!this.selectedPlatform && !this.selectedDate) {
+            return {
+                className: 'pending',
+                label: 'Waiting',
+                note: 'Start by selecting a platform and date.',
+                isReady: false
+            };
+        }
+
+        if (!this.selectedPlatform) {
+            return {
+                className: 'pending',
+                label: 'Waiting',
+                note: 'Select a platform to continue.',
+                isReady: false
+            };
+        }
+
+        if (!this.selectedDate) {
+            return {
+                className: 'pending',
+                label: 'Waiting',
+                note: 'Select a date to check availability.',
+                isReady: false
+            };
+        }
+
+        if (!startTime) {
+            return {
+                className: 'pending',
+                label: 'Waiting',
+                note: 'Choose a start time and duration.',
+                isReady: false
+            };
+        }
+
+        if (this.isPastStartTime(this.selectedDate, startTime)) {
+            return {
+                className: 'conflict',
+                label: 'Invalid',
+                note: 'Past time slots cannot be reserved for today.',
+                isReady: false
+            };
+        }
+
+        if (!durationValue) {
+            const waitingNote = this.pendingSlotStartTime
+                ? 'Start time selected. Click a same or later slot to set end time.'
+                : 'Choose a duration to proceed.';
+
+            return {
+                className: 'pending',
+                label: 'Waiting',
+                note: waitingNote,
+                isReady: false
+            };
+        }
+
+        const duration = parseInt(durationValue, 10);
+        if (Number.isNaN(duration) || duration <= 0) {
+            return {
+                className: 'pending',
+                label: 'Waiting',
+                note: 'Enter a valid duration to proceed.',
+                isReady: false
+            };
+        }
+
+        const endTime = this.addHoursToTime(startTime, duration);
+        if (this.timeToMinutes(endTime) < this.timeToMinutes(startTime)) {
+            return {
+                className: 'conflict',
+                label: 'Invalid',
+                note: 'Reservation cannot extend past midnight.',
+                isReady: false
+            };
+        }
+
+        const conflicts = this.checkForConflicts(this.selectedPlatform, this.selectedDate, startTime, endTime);
+        if (conflicts.length > 0) {
+            return {
+                className: 'conflict',
+                label: 'Conflict',
+                note: `Selected time overlaps with ${conflicts[0].name}'s reservation.`,
+                isReady: false
+            };
+        }
+
+        return {
+            className: 'ready',
+            label: 'Ready',
+            note: 'Everything looks good. Review and confirm your reservation.',
+            isReady: true
+        };
+    }
+
+    updateSelectionSummary() {
+        const platformField = document.getElementById('summaryPlatform');
+        const dateField = document.getElementById('summaryDate');
+        const timeField = document.getElementById('summaryTime');
+        const statusField = document.getElementById('summaryStatus');
+        const noteField = document.getElementById('summaryNote');
+
+        if (!platformField || !dateField || !timeField || !statusField || !noteField) {
+            return;
+        }
+
+        const startTime = document.getElementById('startTime').value;
+        const durationValue = document.getElementById('duration').value;
+        const duration = parseInt(durationValue, 10);
+
+        platformField.textContent = this.selectedPlatform || 'Not selected';
+        dateField.textContent = this.selectedDate ? this.formatDateDisplay(this.selectedDate) : 'Not selected';
+
+        if (startTime && !Number.isNaN(duration) && duration > 0) {
+            const endTime = this.addHoursToTime(startTime, duration);
+            timeField.textContent = `${this.formatTime(startTime)} - ${this.formatTime(endTime)}`;
+        } else {
+            timeField.textContent = 'Not selected';
+        }
+
+        const status = this.getSelectionStatus();
+        statusField.textContent = status.label;
+        statusField.className = `status-chip ${status.className}`;
+        noteField.textContent = status.note;
+
+        this.updateStepIndicators(status);
+    }
+
+    updateActionState() {
+        const button = document.getElementById('makeReservationBtn');
+        if (!button) return;
+
+        const status = this.getSelectionStatus();
+        button.disabled = !status.isReady;
+        button.title = status.isReady
+            ? 'Review reservation before final confirmation'
+            : status.note;
+    }
+
+    updateStepIndicators(status = this.getSelectionStatus()) {
+        const steps = document.querySelectorAll('.booking-steps .step-item');
+        if (steps.length !== 3) return;
+
+        const hasPlatform = Boolean(this.selectedPlatform);
+        const hasDate = Boolean(this.selectedDate);
+
+        const completion = [
+            hasPlatform,
+            hasPlatform && hasDate,
+            status.isReady
+        ];
+
+        steps.forEach((step, index) => {
+            step.classList.remove('active', 'current', 'completed');
+
+            if (completion[index]) {
+                step.classList.add('completed');
+            }
+        });
+
+        const currentIndex = completion.findIndex((item) => !item);
+        steps[currentIndex === -1 ? steps.length - 1 : currentIndex].classList.add('current');
+    }
+
     handleDateChange() {
         const dateInput = document.getElementById('dateInput');
         this.selectedDate = dateInput.value || null;
+        this.pendingSlotStartTime = null;
+        this.selectedStartTime = null;
+        this.selectedDuration = null;
+        this.selectedDayReservations = [];
+        this.selectedDayBookedHours = new Set();
+        this.isLoadingAvailability = Boolean(this.selectedPlatform && this.selectedDate);
+        document.getElementById('startTime').value = '';
+        document.getElementById('duration').value = '';
         this.clearAvailabilityMessage();
+        this.updateQuickDateButtonState();
         this.updateReservationSectionVisibility();
+        this.updateSelectionSummary();
+        this.updateActionState();
+
+        if (this.selectedDate && this.selectedPlatform) {
+            this.refreshSelectedAvailability();
+        }
     }
 
     clearAvailabilityMessage() {
@@ -215,11 +1034,26 @@ class ReservationSystem {
     clearSelection() {
         document.getElementById('startTime').value = '';
         document.getElementById('duration').value = '';
+        this.selectedStartTime = null;
+        this.selectedDuration = null;
+        this.pendingSlotStartTime = null;
         this.clearAvailabilityMessage();
         this.updateReservationSectionVisibility();
+        this.updateSelectionSummary();
+        this.updateActionState();
     }
 
-    showConfirmationModal() {
+    resetReservationDetails(messageText = '') {
+        this.clearSelection();
+
+        if (!messageText) return;
+
+        const message = document.getElementById('availabilityMessage');
+        message.className = 'availability-message unavailable';
+        message.textContent = messageText;
+    }
+
+    async showConfirmationModal() {
         const startTime = document.getElementById('startTime').value;
         const duration = document.getElementById('duration').value;
         const messageDiv = document.getElementById('availabilityMessage');
@@ -246,6 +1080,12 @@ class ReservationSystem {
             return;
         }
 
+        if (this.isPastStartTime(this.selectedDate, startTime)) {
+            messageDiv.className = 'availability-message unavailable';
+            messageDiv.innerHTML = '⚠️ Past time slots cannot be reserved for today.';
+            return;
+        }
+
         if (!duration) {
             messageDiv.className = 'availability-message unavailable';
             messageDiv.innerHTML = '⚠️ Please select a duration.';
@@ -259,6 +1099,11 @@ class ReservationSystem {
         if (this.timeToMinutes(endTime) < this.timeToMinutes(startTime)) {
             messageDiv.className = 'availability-message unavailable';
             messageDiv.innerHTML = '⚠️ Reservation cannot extend past midnight. Please choose an earlier start time or shorter duration.';
+            return;
+        }
+
+        const availabilityLoaded = await this.refreshSelectedAvailability(true);
+        if (!availabilityLoaded) {
             return;
         }
 
@@ -288,6 +1133,10 @@ class ReservationSystem {
                 <span class="detail-value highlight">${this.selectedPlatform}</span>
             </div>
             <div class="detail-row">
+                <span class="detail-label">Team:</span>
+                <span class="detail-value highlight">${this.currentUser?.username || 'Unknown Team'}</span>
+            </div>
+            <div class="detail-row">
                 <span class="detail-label">Date:</span>
                 <span class="detail-value">${this.formatDateDisplay(this.selectedDate)}</span>
             </div>
@@ -314,20 +1163,20 @@ class ReservationSystem {
     closeConfirmationModal() {
         const modal = document.getElementById('confirmationModal');
         modal.classList.remove('show');
-        // Clear form inputs but keep time selection
-        document.getElementById('name').value = '';
-        document.getElementById('email').value = '';
-        document.getElementById('phone').value = '';
-        document.getElementById('notes').value = '';
     }
 
     checkForConflicts(platform, date, startTime, endTime) {
         const startMinutes = this.timeToMinutes(startTime);
         const endMinutes = this.timeToMinutes(endTime);
 
-        return this.reservations.filter(reservation => {
-            if (reservation.platform !== platform) return false;
-            if (reservation.date !== date) return false;
+        const isSelectedDayContext = platform === this.selectedPlatform && date === this.selectedDate;
+        const sourceReservations = isSelectedDayContext ? this.selectedDayReservations : this.reservations;
+
+        return sourceReservations.filter(reservation => {
+            if (!isSelectedDayContext) {
+                if (reservation.platform !== platform) return false;
+                if (reservation.date !== date) return false;
+            }
 
             const resStartMinutes = this.timeToMinutes(reservation.time);
             const resEndTime = this.addHoursToTime(reservation.time, reservation.duration);
@@ -338,7 +1187,7 @@ class ReservationSystem {
         });
     }
 
-    renderTimeSlots(selectedHours = [], hasConflict = false) {
+    renderTimeSlots(selectedHours = [], hasConflict = false, isSelectingEndTime = false) {
         const container = document.getElementById('timelineContainer');
         
         if (!container) return;
@@ -349,6 +1198,11 @@ class ReservationSystem {
             return;
         }
 
+        if (this.isLoadingAvailability) {
+            container.innerHTML = '<p class="empty-state">Loading availability...</p>';
+            return;
+        }
+
         // Add legend
         const legend = document.createElement('div');
         legend.className = 'timeline-legend';
@@ -356,6 +1210,10 @@ class ReservationSystem {
             <div class="legend-item">
                 <div class="legend-color available"></div>
                 <span>Available</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color past"></div>
+                <span>Past</span>
             </div>
             <div class="legend-item">
                 <div class="legend-color booked"></div>
@@ -370,76 +1228,61 @@ class ReservationSystem {
         
         for (let hour = 0; hour < 24; hour++) {
             const isSelected = selectedHours.includes(hour);
-            const slot = this.createTimeSlotSquare(hour, isSelected, hasConflict);
+            const slot = this.createTimeSlotSquare(hour, isSelected, hasConflict, isSelectingEndTime);
             grid.appendChild(slot);
         }
         
         container.appendChild(grid);
     }
 
-    createTimeSlotSquare(hour, isSelected = false, hasConflict = false) {
+    createTimeSlotSquare(hour, isSelected = false, hasConflict = false, isSelectingEndTime = false) {
         const square = document.createElement('div');
         const hourStart = `${String(hour).padStart(2, '0')}:00`;
-        const hourEnd = `${String((hour + 1) % 24).padStart(2, '0')}:00`;
 
-        // Get reservations for this platform and date
-        const dayReservations = this.reservations.filter(r => 
-            r.platform === this.selectedPlatform && r.date === this.selectedDate
-        );
+        // Use latest availability data for the selected platform and date
+        const dayReservations = this.selectedDayReservations;
 
         // Find reservations that overlap with this hour
         const hourStartMinutes = hour * 60;
         const hourEndMinutes = (hour + 1) * 60;
 
-        let overlappingReservations = [];
-        
-        dayReservations.forEach(reservation => {
+        const overlappingReservations = dayReservations.filter((reservation) => {
             const resStartMinutes = this.timeToMinutes(reservation.time);
-            const resEndTime = this.addHoursToTime(reservation.time, reservation.duration);
+            const resEndTime = this.addHoursToTime(reservation.time, Number(reservation.duration));
             const resEndMinutes = this.timeToMinutes(resEndTime);
 
-            // Check if this reservation overlaps with current hour
-            if (resStartMinutes < hourEndMinutes && resEndMinutes > hourStartMinutes) {
-                const overlapStart = Math.max(hourStartMinutes, resStartMinutes);
-                const overlapEnd = Math.min(hourEndMinutes, resEndMinutes);
-                const overlapMinutes = overlapEnd - overlapStart;
-                
-                overlappingReservations.push({
-                    reservation: reservation,
-                    overlapMinutes: overlapMinutes
-                });
-            }
+            return resStartMinutes < hourEndMinutes && resEndMinutes > hourStartMinutes;
         });
 
         // Determine slot status
         let statusClass = 'available';
         let statusText = 'Available';
         let bookingInfo = '';
-        let isFullyBooked = false;
-        
-        if (overlappingReservations.length > 0) {
-            const totalOverlap = overlappingReservations.reduce((sum, r) => sum + r.overlapMinutes, 0);
-            
-            if (totalOverlap >= 60) {
-                statusClass = 'booked';
-                statusText = 'Reserved';
-                bookingInfo = overlappingReservations[0].reservation.name;
-                isFullyBooked = true;
-            } else {
-                statusClass = 'partially-booked';
-                statusText = 'Partial';
-                bookingInfo = overlappingReservations[0].reservation.name;
+        const isFullyBooked = this.selectedDayBookedHours.has(hour);
+        const isPastSlot = this.isPastSlotHour(this.selectedDate, hour);
+
+        if (isPastSlot) {
+            statusClass = 'past';
+            statusText = 'Passed';
+        } else if (isFullyBooked) {
+            statusClass = 'booked';
+            statusText = 'Reserved';
+            if (overlappingReservations.length > 0) {
+                bookingInfo = overlappingReservations[0].name;
             }
         }
 
         // Add selection highlighting
-        if (isSelected) {
-            if (hasConflict) {
+        if (isSelected && !isPastSlot) {
+            if (isSelectingEndTime) {
+                statusClass += ' selected-start';
+                statusText = 'Start';
+            } else if (hasConflict) {
                 statusClass += ' selected-conflict';
                 statusText = 'Conflict!';
-            } else {
+            } else if (!isFullyBooked) {
                 statusClass += ' selected-available';
-                statusText = overlappingReservations.length > 0 ? 'Partial' : 'Your Selection';
+                statusText = 'Your Selection';
             }
         }
 
@@ -457,7 +1300,7 @@ class ReservationSystem {
         `;
 
         // Add click handler to select start time (only if not fully booked)
-        if (!isFullyBooked) {
+        if (!isFullyBooked && !isPastSlot) {
             square.style.cursor = 'pointer';
             square.addEventListener('click', () => this.selectStartTime(hourStart));
         } else {
@@ -465,79 +1308,157 @@ class ReservationSystem {
         }
 
         // Add tooltip for booked slots
-        if (overlappingReservations.length > 0) {
+        if (isPastSlot) {
+            square.title = 'Past time slot (not reservable today)';
+        } else if (overlappingReservations.length > 0) {
             let tooltipText = '';
-            overlappingReservations.forEach(overlap => {
-                const res = overlap.reservation;
+            overlappingReservations.forEach((res) => {
                 const endTime = this.addHoursToTime(res.time, res.duration);
                 tooltipText += `${res.name}\n${this.formatTime(res.time)} - ${this.formatTime(endTime)}\n`;
             });
             square.title = tooltipText.trim();
         } else if (isSelected) {
-            square.title = hasConflict ? 'This time conflicts with an existing reservation' : 'Your selected time slot';
+            if (isSelectingEndTime) {
+                square.title = 'Start time selected. Click a same or later slot to set end time';
+            } else {
+                square.title = hasConflict ? 'This time conflicts with an existing reservation' : 'Your selected time slot';
+            }
         } else {
-            square.title = 'Click to select this as start time';
+            square.title = this.pendingSlotStartTime
+                ? 'Click to set this as end time'
+                : 'Click to select this as start time';
         }
 
         return square;
     }
 
     selectStartTime(time) {
-        // Set the start time input
-        document.getElementById('startTime').value = time;
-        
-        // Set duration to 1 hour by default
-        document.getElementById('duration').value = '1';
-        
-        // Clear availability message
-        this.clearAvailabilityMessage();
-        
-        // Update visualization (will show the selected hour with 1-hour duration)
-        this.updateTimeSlotSelection();
-        
-        // Scroll to the time inputs
-        const timeInputs = document.querySelector('.time-duration-selection');
-        if (timeInputs) {
-            timeInputs.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        const startTimeInput = document.getElementById('startTime');
+        const durationInput = document.getElementById('duration');
+        const messageDiv = document.getElementById('availabilityMessage');
+
+        // First click: choose start time and wait for end selection.
+        if (!this.pendingSlotStartTime || durationInput.value) {
+            this.pendingSlotStartTime = time;
+            startTimeInput.value = time;
+            durationInput.value = '';
+            this.selectedStartTime = null;
+            this.selectedDuration = null;
+
+            messageDiv.className = 'availability-message available';
+            messageDiv.textContent = `Start time set to ${this.formatTime(time)}. Click a same or later slot to set end time.`;
+
+            this.updateTimeSlotSelection();
+            this.updateSelectionSummary();
+            this.updateActionState();
+
+            const timeInputs = document.querySelector('.time-duration-selection');
+            if (timeInputs) {
+                timeInputs.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            }
+            return;
         }
+
+        const startMinutes = this.timeToMinutes(this.pendingSlotStartTime);
+        const endMinutes = this.timeToMinutes(time);
+
+        if (endMinutes < startMinutes) {
+            this.resetReservationDetails('End time cannot be earlier than start time. Please select your time range again.');
+            return;
+        }
+
+        const durationHours = ((endMinutes - startMinutes) / 60) + 1;
+        if (!Number.isInteger(durationHours)) {
+            this.resetReservationDetails('Please select full-hour start and end slots.');
+            return;
+        }
+
+        startTimeInput.value = this.pendingSlotStartTime;
+        durationInput.value = String(durationHours);
+
+        if (durationInput.value !== String(durationHours)) {
+            const maxDuration = durationInput.options[durationInput.options.length - 1].value;
+            messageDiv.className = 'availability-message unavailable';
+            messageDiv.textContent = `Selected range is ${durationHours} hours, but maximum allowed is ${maxDuration} hours. Click an earlier end slot.`;
+            this.updateTimeSlotSelection();
+            this.updateSelectionSummary();
+            this.updateActionState();
+            return;
+        }
+
+        this.pendingSlotStartTime = null;
+        messageDiv.className = 'availability-message available';
+        messageDiv.textContent = `Selected ${this.formatTime(startTimeInput.value)} to ${this.formatTime(time)} (${durationHours} hour${durationHours > 1 ? 's' : ''}).`;
+
+        this.updateTimeSlotSelection();
+        this.updateSelectionSummary();
+        this.updateActionState();
     }
 
 
-    handleFormSubmit(e) {
+    async handleFormSubmit(e) {
         e.preventDefault();
 
-        const name = document.getElementById('name').value.trim();
-        const email = document.getElementById('email').value.trim();
-        const phone = document.getElementById('phone').value.trim();
-        const notes = document.getElementById('notes').value.trim();
+        const teamName = this.currentUser?.username || 'team';
+        const normalizedTeamForEmail = teamName
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, '.')
+            .replace(/(^\.|\.$)/g, '') || 'team';
+        const fallbackEmail = `${normalizedTeamForEmail}@local.invalid`;
+        const submitButton = e.submitter || document.querySelector('#reservationForm button[type="submit"]');
+        if (submitButton) {
+            submitButton.disabled = true;
+        }
 
-        const reservation = {
-            id: Date.now().toString(),
-            platform: this.selectedPlatform,
-            date: this.selectedDate,
-            time: this.selectedStartTime,
-            duration: this.selectedDuration,
-            name: name,
-            email: email,
-            phone: phone,
-            notes: notes,
-            createdAt: new Date().toISOString()
-        };
+        try {
+            const payload = {
+                platform: this.selectedPlatform,
+                date: this.selectedDate,
+                startTime: this.selectedStartTime,
+                duration: this.selectedDuration,
+                name: teamName,
+                email: fallbackEmail,
+                phone: '',
+                notes: ''
+            };
 
-        this.reservations.push(reservation);
-        this.saveReservations();
-        
-        // Close confirmation modal
-        this.closeConfirmationModal();
-        
-        // Show success modal
-        this.showSuccessModal(reservation);
-        
-        // Reset form and selections
-        document.getElementById('reservationForm').reset();
-        this.selectedStartTime = null;
-        this.selectedDuration = null;
-        this.clearSelection();
+            const response = await this.apiRequest('/reservations', {
+                method: 'POST',
+                body: JSON.stringify(payload)
+            });
+            const reservation = response?.reservation;
+            if (!reservation) {
+                throw new Error('Backend returned an invalid reservation response.');
+            }
+
+            await Promise.all([
+                this.syncReservationsFromApi(),
+                this.refreshSelectedAvailability(false)
+            ]);
+            this.updateSelectionSummary();
+            this.updateActionState();
+
+            // Close confirmation modal
+            this.closeConfirmationModal();
+
+            // Show success modal
+            this.showSuccessModal(reservation);
+
+            // Reset form and selections
+            document.getElementById('reservationForm').reset();
+            this.selectedStartTime = null;
+            this.selectedDuration = null;
+            this.clearSelection();
+        } catch (error) {
+            if (this.handleUnauthorized(error)) {
+                return;
+            }
+            this.showSyncError(`Failed to create reservation: ${error.message}`);
+        } finally {
+            if (submitButton) {
+                submitButton.disabled = false;
+            }
+        }
     }
 
     showSuccessModal(reservation) {
@@ -553,7 +1474,8 @@ class ReservationSystem {
             <strong>${this.formatTime(reservation.time)} - ${this.formatTime(endTime)}</strong><br>
             Duration: <strong>${reservation.duration} hour${reservation.duration > 1 ? 's' : ''}</strong><br>
             <br>
-            A confirmation email will be sent to <strong>${reservation.email}</strong>
+            Reserved by team: <strong>${reservation.name}</strong><br>
+            You can review or cancel it anytime in the list below.
         `;
 
         modal.classList.add('show');
@@ -566,9 +1488,14 @@ class ReservationSystem {
 
     renderReservationsList() {
         const container = document.getElementById('reservationsList');
+        if (!container) return;
         
         if (this.reservations.length === 0) {
-            container.innerHTML = '<p class="empty-state">No reservations yet</p>';
+            const emptyMessage = this.currentUser?.role === 'admin'
+                ? 'No reservations found across all teams yet.'
+                : 'No reservations yet. Create one below to get started.';
+            container.innerHTML = `<p class="empty-state">${emptyMessage}</p>`;
+            this.updateStepIndicators();
             return;
         }
 
@@ -590,51 +1517,55 @@ class ReservationSystem {
                 deleteBtn.addEventListener('click', () => this.deleteReservation(reservation.id));
             }
         });
+
+        this.updateStepIndicators();
     }
 
     createReservationCard(reservation) {
         const endTime = this.addHoursToTime(reservation.time, reservation.duration);
+        const isAdmin = this.currentUser?.role === 'admin';
+        const ownerLabel = reservation.owner || reservation.name || 'Unknown team';
+        const reservationState = this.getReservationVisualState(reservation);
+        const reservationStateLabel = reservationState === 'active' ? 'Active now' : 'Upcoming';
         return `
-            <div class="reservation-card">
-                <button class="delete-btn" id="delete-${reservation.id}" title="Cancel reservation">×</button>
-                <div class="date">🖥️ ${reservation.platform}</div>
-                <div class="date">${this.formatDateDisplay(reservation.date)}</div>
-                <div class="time">⏰ ${this.formatTime(reservation.time)} - ${this.formatTime(endTime)}</div>
-                <div class="time">⏳ ${reservation.duration} hour${reservation.duration > 1 ? 's' : ''}</div>
-                <div class="name">👤 ${reservation.name}</div>
+            <div class="reservation-card ${reservationState}">
+                <div class="reservation-card-head">
+                    <div class="reservation-card-head-left">
+                        <span class="reservation-platform ${reservationState}">${reservation.platform}</span>
+                        <span class="reservation-date">${this.formatDateDisplay(reservation.date)}</span>
+                    </div>
+                    <button class="delete-btn" id="delete-${reservation.id}" title="Cancel reservation">Cancel</button>
+                </div>
+                <div class="reservation-time">${this.formatTime(reservation.time)} - ${this.formatTime(endTime)}</div>
+                <div class="reservation-meta">
+                    <span>${reservation.duration} hour${reservation.duration > 1 ? 's' : ''}</span>
+                    <span>${isAdmin ? `Team: ${ownerLabel}` : reservation.name}</span>
+                </div>
+                <div class="reservation-state ${reservationState}">${reservationStateLabel}</div>
             </div>
         `;
     }
 
-    deleteReservation(id) {
+    async deleteReservation(id) {
         if (confirm('Are you sure you want to cancel this reservation?')) {
-            this.reservations = this.reservations.filter(r => r.id !== id);
-            this.saveReservations();
-            this.updateTimeSlotSelection();
-        }
-    }
+            try {
+                await this.apiRequest(`/reservations/${encodeURIComponent(id)}`, {
+                    method: 'DELETE'
+                });
 
-    loadReservations() {
-        try {
-            const stored = localStorage.getItem('reservations');
-            const reservations = stored ? JSON.parse(stored) : [];
-            
-            // Add default platform for backward compatibility with old reservations
-            return reservations.map(res => ({
-                ...res,
-                platform: res.platform || 'W7900D'
-            }));
-        } catch (error) {
-            console.error('Error loading reservations:', error);
-            return [];
-        }
-    }
-
-    saveReservations() {
-        try {
-            localStorage.setItem('reservations', JSON.stringify(this.reservations));
-        } catch (error) {
-            console.error('Error saving reservations:', error);
+                await Promise.all([
+                    this.syncReservationsFromApi(),
+                    this.refreshSelectedAvailability(false)
+                ]);
+                this.updateTimeSlotSelection();
+                this.updateSelectionSummary();
+                this.updateActionState();
+            } catch (error) {
+                if (this.handleUnauthorized(error)) {
+                    return;
+                }
+                this.showSyncError(`Failed to cancel reservation: ${error.message}`);
+            }
         }
     }
 }

@@ -1,102 +1,62 @@
-# Time Slot Reservation System
+# Reservation Frontend
 
-A beautiful, modern web application for making reservations for different time slots.
+This frontend now uses the backend API + PostgreSQL for real multi-user reservations.
 
 ## Features
 
-✨ **Modern UI/UX**
-- Clean, responsive design that works on all devices
-- Smooth animations and transitions
-- Intuitive user interface
+- Two platforms: `Node#1`, `Node#2`
+- Account login required before reservation actions
+- Password reset tab for admin-provisioned team accounts
+- 24-hour timeline with live backend availability
+- Two-click range selection:
+  - first click = start slot
+  - second click = inclusive end slot
+- Conflict-safe booking and cancellation
+- Upcoming reservations list synced from backend account session
+- Expired reservations are auto-cleaned on page refresh/login
 
-📅 **Date Selection**
-- Interactive date picker
-- Cannot select past dates
-- Defaults to tomorrow's date
+## Runtime Architecture
 
-⏰ **Time Slot Management**
-- 12 available time slots per day (9 AM - 8 PM)
-- Visual indication of available vs. booked slots
-- Click to select available time slots
+- `web/script.js` fetches data from backend API
+- No browser `localStorage` reservation persistence is used anymore
+- Backend source of truth is PostgreSQL (`backend/db/schema.sql`)
 
-📝 **Reservation Form**
-- User information collection (name, email, phone, notes)
-- Form validation
-- Confirmation modal after successful booking
+## Run the Full System
 
-💾 **Data Persistence**
-- Reservations stored in browser's local storage
-- View all your reservations in the sidebar
-- Cancel reservations with a single click
+1) Start backend
 
-## How to Use
-
-1. **Open the Application**
-   - Simply open `index.html` in your web browser
-   - No server or installation required!
-
-2. **Select a Date**
-   - Use the date picker to choose your desired date
-   - Only future dates can be selected
-
-3. **Choose a Time Slot**
-   - Browse available time slots
-   - Green slots are available, gray slots are already booked
-   - Click on an available slot to select it
-
-4. **Fill in Your Information**
-   - Enter your name and email (required)
-   - Optionally add phone number and notes
-   - Click "Confirm Reservation"
-
-5. **View Your Reservations**
-   - All your reservations appear in the right sidebar
-   - Click the × button to cancel a reservation
-
-## File Structure
-
-```
-CIE/
-├── index.html      # Main HTML structure
-├── styles.css      # Styling and layout
-├── script.js       # JavaScript functionality
-└── README.md       # This file
+```bash
+cd ../backend
+cp .env.example .env
+# Edit DATABASE_URL in .env
+npm install
+npm run db:init
+npm run dev
 ```
 
-## Technical Details
+Default debug account (seeded by schema):
 
-- **Pure HTML, CSS, and JavaScript** - No frameworks or libraries required
-- **Responsive Design** - Works on desktop, tablet, and mobile
-- **Local Storage** - Data persists across browser sessions
-- **Modern ES6+ JavaScript** - Clean, maintainable code with classes
+- Username: `admin`
+- Password: `amd1234!`
 
-## Browser Compatibility
+Team accounts are created by admin. Teams can use the frontend reset-password tab to change their assigned/default password.
 
-Works on all modern browsers:
-- Chrome/Edge (recommended)
-- Firefox
-- Safari
-- Opera
+2) Open frontend
 
-## Customization
+- Open `index.html` directly in browser, or serve `web/` with a static server.
+- Default backend URL expected by frontend is `http://localhost:4100/api`.
 
-You can easily customize the application by modifying:
+If needed, override API base URL before loading `script.js`:
 
-- **Time Slots**: Edit the `timeSlots` array in `script.js`
-- **Colors**: Modify CSS variables in `:root` section of `styles.css`
-- **Form Fields**: Add or remove fields in `index.html` and update `script.js`
+```html
+<script>
+  window.RESERVATION_API_BASE_URL = 'http://your-host:4100/api';
+</script>
+```
 
-## Future Enhancements
+## Important Files
 
-Potential features to add:
-- Backend integration for multi-user support
-- Email notifications
-- Different reservation durations
-- Admin panel for managing reservations
-- Export reservations to calendar
-- Payment integration
-
----
-
-Enjoy your reservation system! 🎉
+- `index.html` - UI structure
+- `styles.css` - visual styling
+- `script.js` - frontend logic + API integration
 
