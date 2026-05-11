@@ -1,0 +1,3 @@
+[submodule "AMD-OneClick"]
+	path = AMD-OneClick
+	url = https://github.com/tywuAMD/AMD-OneClick.git
