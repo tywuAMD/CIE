@@ -18,7 +18,7 @@ metadata:
   namespace: default
 type: Opaque
 stringData:
-  DATABASE_URL: "postgresql://cie_user:change_me@cie-postgres.default.svc.cluster.local:5432/cie_reservation"
+  DATABASE_URL: "postgresql://cie_user:admin123@cie-postgres.default.svc.cluster.local:5432/cie_reservation"
   ONECLICK_BRIDGE_TOKEN: "change_this_shared_bridge_token"
 ---
 apiVersion: v1

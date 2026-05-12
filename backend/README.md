@@ -34,6 +34,9 @@ Update `DATABASE_URL` in `.env` to point to your PostgreSQL instance.
 DATABASE_URL=postgresql://cie_user:change_me@localhost:5432/cie_reservation
 ```
 
+Do not use `postgres://postgres:postgres@localhost:5432/...` unless your PostgreSQL user/password is actually configured that way.  
+If you see `password authentication failed for user "postgres"`, switch to the `cie_user` connection above (or set the correct real password for your chosen user).
+
 For OneClick notebook bridge integration, also configure:
 
 ```bash
