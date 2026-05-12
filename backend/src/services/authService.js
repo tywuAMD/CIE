@@ -15,6 +15,7 @@ function sanitizeUser(row) {
     return {
         id: row.id,
         username: row.username,
+        email: row.email || null,
         role: row.role
     };
 }
@@ -84,7 +85,7 @@ async function login(username, password) {
     }
 
     const teamResult = await db.query(
-        `SELECT id, username, role
+        `SELECT id, username, email, role
          FROM teams
          WHERE username = $1
            AND is_active = TRUE
@@ -140,7 +141,7 @@ async function getUserBySessionToken(sessionToken) {
     const tokenHash = hashSessionToken(token);
 
     const result = await db.query(
-        `SELECT t.id, t.username, t.role
+        `SELECT t.id, t.username, t.email, t.role
          FROM sessions s
          JOIN teams t ON t.id = s.team_id
          WHERE s.session_token_hash = $1

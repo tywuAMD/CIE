@@ -16,6 +16,10 @@ class ReservationSystem {
         this.selectedDayBookedHours = new Set();
         this.isLoadingAvailability = false;
         this.availabilityRequestId = 0;
+        this.workspaceStatusByReservation = new Map();
+        this.workspacePollingTimer = null;
+        this.workspacePollInFlight = false;
+        this.workspacePollingIntervalMs = 4000;
 
         this.init().catch((error) => {
             console.error('Initialization error:', error);
@@ -205,6 +209,8 @@ class ReservationSystem {
         }
 
         this.currentUser = null;
+        this.workspaceStatusByReservation.clear();
+        this.stopWorkspacePolling();
         this.showLoginScreen('Session expired. Please log in again.', 'error');
         return true;
     }
@@ -293,6 +299,7 @@ class ReservationSystem {
         const payload = await this.apiRequest(`/reservations${suffix}`);
         this.reservations = payload?.reservations || [];
         this.renderReservationsList();
+        await this.syncWorkspaceStatusesForActiveReservations();
     }
 
     async refreshSelectedAvailability(showErrorMessage = true) {
@@ -605,6 +612,9 @@ class ReservationSystem {
         this.selectedDayBookedHours = new Set();
         this.isLoadingAvailability = false;
         this.availabilityRequestId += 1;
+        this.workspaceStatusByReservation.clear();
+        this.stopWorkspacePolling();
+        this.workspacePollInFlight = false;
 
         this.resetFormInputs();
         this.renderPlatformsLoadingState();
@@ -745,6 +755,246 @@ class ReservationSystem {
     timeToMinutes(time) {
         const [h, m] = time.split(':').map(Number);
         return h * 60 + m;
+    }
+
+    escapeHtml(value) {
+        return String(value || '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
+    getWorkspaceStatusMeta(workspace) {
+        const status = String(workspace?.status || 'not_found').toLowerCase();
+        const statusMessage = workspace?.message ? this.escapeHtml(workspace.message) : '';
+
+        if (status === 'ready') {
+            return {
+                className: 'ready',
+                label: 'Notebook Ready',
+                message: statusMessage || 'Notebook is ready to open.'
+            };
+        }
+
+        if (['allocating', 'pending', 'loading', 'initializing', 'jupyter_starting', 'running'].includes(status)) {
+            return {
+                className: 'pending',
+                label: 'Launching',
+                message: statusMessage || 'Preparing notebook environment...'
+            };
+        }
+
+        if (status === 'failed') {
+            return {
+                className: 'failed',
+                label: 'Launch Failed',
+                message: statusMessage || 'Notebook launch failed. Try again.'
+            };
+        }
+
+        return {
+            className: 'idle',
+            label: 'Not Launched',
+            message: statusMessage || 'Launch notebook during your active reservation.'
+        };
+    }
+
+    isWorkspacePendingStatus(status) {
+        const normalized = String(status || '').toLowerCase();
+        return ['allocating', 'pending', 'loading', 'initializing', 'jupyter_starting', 'running'].includes(normalized);
+    }
+
+    getActiveReservationsForWorkspace() {
+        if (!this.currentUser || this.currentUser.role === 'admin') {
+            return [];
+        }
+
+        return this.reservations.filter((reservation) => this.getReservationVisualState(reservation) === 'active');
+    }
+
+    async syncWorkspaceStatusesForActiveReservations(options = {}) {
+        if (!this.currentUser || this.currentUser.role === 'admin') {
+            if (this.workspaceStatusByReservation.size > 0) {
+                this.workspaceStatusByReservation.clear();
+            }
+            this.stopWorkspacePolling();
+            return;
+        }
+
+        if (options.fromPolling && this.workspacePollInFlight) {
+            return;
+        }
+
+        const activeReservations = this.getActiveReservationsForWorkspace();
+        const activeIds = new Set(activeReservations.map((reservation) => reservation.id));
+
+        Array.from(this.workspaceStatusByReservation.keys()).forEach((reservationId) => {
+            if (!activeIds.has(reservationId)) {
+                this.workspaceStatusByReservation.delete(reservationId);
+            }
+        });
+
+        if (activeReservations.length === 0) {
+            this.stopWorkspacePolling();
+            return;
+        }
+
+        this.workspacePollInFlight = true;
+        let changed = false;
+
+        try {
+            await Promise.all(
+                activeReservations.map(async (reservation) => {
+                    try {
+                        const query = new URLSearchParams({ reservationId: reservation.id });
+                        const payload = await this.apiRequest(`/workspaces/status?${query.toString()}`);
+                        const workspace = payload?.workspace;
+
+                        if (!workspace || workspace.status === 'not_found') {
+                            if (this.workspaceStatusByReservation.delete(reservation.id)) {
+                                changed = true;
+                            }
+                            return;
+                        }
+
+                        const previous = this.workspaceStatusByReservation.get(reservation.id);
+                        if (JSON.stringify(previous || null) !== JSON.stringify(workspace)) {
+                            this.workspaceStatusByReservation.set(reservation.id, workspace);
+                            changed = true;
+                        }
+                    } catch (error) {
+                        if (this.handleUnauthorized(error)) {
+                            return;
+                        }
+                        if (!options.fromPolling) {
+                            this.showSyncError(`Unable to sync notebook status: ${error.message}`);
+                        }
+                    }
+                })
+            );
+        } finally {
+            this.workspacePollInFlight = false;
+        }
+
+        if (changed) {
+            this.renderReservationsList();
+        }
+
+        this.reconcileWorkspacePolling();
+    }
+
+    startWorkspacePolling() {
+        if (this.workspacePollingTimer) {
+            return;
+        }
+
+        this.workspacePollingTimer = setInterval(() => {
+            this.syncWorkspaceStatusesForActiveReservations({ fromPolling: true });
+        }, this.workspacePollingIntervalMs);
+    }
+
+    stopWorkspacePolling() {
+        if (!this.workspacePollingTimer) {
+            return;
+        }
+
+        clearInterval(this.workspacePollingTimer);
+        this.workspacePollingTimer = null;
+    }
+
+    reconcileWorkspacePolling() {
+        const activeReservations = this.getActiveReservationsForWorkspace();
+        if (activeReservations.length === 0) {
+            this.stopWorkspacePolling();
+            return;
+        }
+
+        const hasPending = activeReservations.some((reservation) => {
+            const workspace = this.workspaceStatusByReservation.get(reservation.id);
+            return this.isWorkspacePendingStatus(workspace?.status);
+        });
+
+        if (hasPending) {
+            this.startWorkspacePolling();
+        } else {
+            this.stopWorkspacePolling();
+        }
+    }
+
+    async handleLaunchWorkspace(reservationId) {
+        try {
+            const payload = await this.apiRequest('/workspaces/request', {
+                method: 'POST',
+                body: JSON.stringify({ reservationId })
+            });
+            const workspace = payload?.workspace;
+
+            if (workspace && workspace.status !== 'not_found') {
+                this.workspaceStatusByReservation.set(reservationId, workspace);
+            } else {
+                this.workspaceStatusByReservation.delete(reservationId);
+            }
+
+            this.renderReservationsList();
+            this.reconcileWorkspacePolling();
+            await this.syncWorkspaceStatusesForActiveReservations();
+        } catch (error) {
+            if (this.handleUnauthorized(error)) {
+                return;
+            }
+            this.showSyncError(`Failed to launch notebook: ${error.message}`);
+        }
+    }
+
+    openWorkspaceForReservation(reservationId) {
+        const workspace = this.workspaceStatusByReservation.get(reservationId);
+        const url = workspace?.url;
+
+        if (!url) {
+            this.showSyncError('Notebook URL is not ready yet.');
+            return;
+        }
+
+        window.open(url, '_blank', 'noopener');
+    }
+
+    async handleActiveReservationCardClick(reservationId) {
+        const workspace = this.workspaceStatusByReservation.get(reservationId) || null;
+        const status = String(workspace?.status || '').toLowerCase();
+
+        if (status === 'ready' && workspace?.url) {
+            this.openWorkspaceForReservation(reservationId);
+            return;
+        }
+
+        if (this.isWorkspacePendingStatus(status)) {
+            return;
+        }
+
+        await this.handleLaunchWorkspace(reservationId);
+    }
+
+    renderWorkspaceActions(reservation) {
+        const workspace = this.workspaceStatusByReservation.get(reservation.id) || null;
+        const statusMeta = this.getWorkspaceStatusMeta(workspace);
+        const isPending = this.isWorkspacePendingStatus(workspace?.status);
+        const hasUrl = Boolean(workspace?.url);
+        const launchLabel = isPending ? 'Launching...' : (workspace ? 'Relaunch Notebook' : 'Launch Notebook');
+
+        return `
+            <div class="workspace-panel">
+                <div class="workspace-status ${statusMeta.className}">
+                    <div class="workspace-status-label">${statusMeta.label}</div>
+                    <div class="workspace-status-message">${statusMeta.message}</div>
+                </div>
+                <div class="workspace-actions">
+                    <button class="workspace-btn launch-btn" id="launch-${reservation.id}" ${isPending ? 'disabled' : ''}>${launchLabel}</button>
+                    <button class="workspace-btn open-btn" id="open-${reservation.id}" ${hasUrl ? '' : 'disabled'}>Open Notebook</button>
+                </div>
+            </div>
+        `;
     }
 
     getReservationVisualState(reservation) {
@@ -1400,11 +1650,13 @@ class ReservationSystem {
         e.preventDefault();
 
         const teamName = this.currentUser?.username || 'team';
+        const userEmail = (this.currentUser?.email || '').trim();
         const normalizedTeamForEmail = teamName
             .toLowerCase()
             .replace(/[^a-z0-9]+/g, '.')
             .replace(/(^\.|\.$)/g, '') || 'team';
         const fallbackEmail = `${normalizedTeamForEmail}@local.invalid`;
+        const reservationEmail = userEmail || fallbackEmail;
         const submitButton = e.submitter || document.querySelector('#reservationForm button[type="submit"]');
         if (submitButton) {
             submitButton.disabled = true;
@@ -1417,7 +1669,7 @@ class ReservationSystem {
                 startTime: this.selectedStartTime,
                 duration: this.selectedDuration,
                 name: teamName,
-                email: fallbackEmail,
+                email: reservationEmail,
                 phone: '',
                 notes: ''
             };
@@ -1514,11 +1766,42 @@ class ReservationSystem {
         sortedReservations.forEach(reservation => {
             const deleteBtn = document.getElementById(`delete-${reservation.id}`);
             if (deleteBtn) {
-                deleteBtn.addEventListener('click', () => this.deleteReservation(reservation.id));
+                deleteBtn.addEventListener('click', (event) => {
+                    event.stopPropagation();
+                    this.deleteReservation(reservation.id);
+                });
             }
         });
 
+        if (this.currentUser?.role !== 'admin') {
+            sortedReservations
+                .filter((reservation) => this.getReservationVisualState(reservation) === 'active')
+                .forEach((reservation) => {
+                    const card = document.getElementById(`reservation-card-${reservation.id}`);
+                    if (card) {
+                        card.addEventListener('click', () => this.handleActiveReservationCardClick(reservation.id));
+                    }
+
+                    const launchBtn = document.getElementById(`launch-${reservation.id}`);
+                    if (launchBtn) {
+                        launchBtn.addEventListener('click', (event) => {
+                            event.stopPropagation();
+                            this.handleLaunchWorkspace(reservation.id);
+                        });
+                    }
+
+                    const openBtn = document.getElementById(`open-${reservation.id}`);
+                    if (openBtn) {
+                        openBtn.addEventListener('click', (event) => {
+                            event.stopPropagation();
+                            this.openWorkspaceForReservation(reservation.id);
+                        });
+                    }
+                });
+        }
+
         this.updateStepIndicators();
+        this.reconcileWorkspacePolling();
     }
 
     createReservationCard(reservation) {
@@ -1527,8 +1810,20 @@ class ReservationSystem {
         const ownerLabel = reservation.owner || reservation.name || 'Unknown team';
         const reservationState = this.getReservationVisualState(reservation);
         const reservationStateLabel = reservationState === 'active' ? 'Active now' : 'Upcoming';
+        const showWorkspaceActions = reservationState === 'active' && !isAdmin;
+        const workspace = this.workspaceStatusByReservation.get(reservation.id) || null;
+        const workspaceStatus = String(workspace?.status || '').toLowerCase();
+        const cardActionHint = showWorkspaceActions
+            ? (workspaceStatus === 'ready' && workspace?.url
+                ? 'Click card to open notebook.'
+                : this.isWorkspacePendingStatus(workspaceStatus)
+                    ? 'Notebook is launching...'
+                    : 'Click card to launch notebook.')
+            : '';
+        const workspaceActions = showWorkspaceActions ? this.renderWorkspaceActions(reservation) : '';
+        const clickableClass = showWorkspaceActions ? 'clickable' : '';
         return `
-            <div class="reservation-card ${reservationState}">
+            <div class="reservation-card ${reservationState} ${clickableClass}" id="reservation-card-${reservation.id}">
                 <div class="reservation-card-head">
                     <div class="reservation-card-head-left">
                         <span class="reservation-platform ${reservationState}">${reservation.platform}</span>
@@ -1541,6 +1836,8 @@ class ReservationSystem {
                     <span>${reservation.duration} hour${reservation.duration > 1 ? 's' : ''}</span>
                     <span>${isAdmin ? `Team: ${ownerLabel}` : reservation.name}</span>
                 </div>
+                ${cardActionHint ? `<div class="reservation-card-hint">${cardActionHint}</div>` : ''}
+                ${workspaceActions}
                 <div class="reservation-state ${reservationState}">${reservationStateLabel}</div>
             </div>
         `;

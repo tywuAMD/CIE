@@ -8,6 +8,7 @@ const authRouter = require('./routes/auth');
 const platformsRouter = require('./routes/platforms');
 const availabilityRouter = require('./routes/availability');
 const reservationsRouter = require('./routes/reservations');
+const workspacesRouter = require('./routes/workspaces');
 
 const app = express();
 
@@ -31,6 +32,7 @@ app.use('/api', requireAuth);
 app.use('/api/platforms', platformsRouter);
 app.use('/api/availability', availabilityRouter);
 app.use('/api/reservations', reservationsRouter);
+app.use('/api/workspaces', workspacesRouter);
 
 app.use((_req, _res, next) => {
     next(new AppError(404, 'Route not found.'));

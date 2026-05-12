@@ -1,0 +1,134 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cie-reservation-config
+  namespace: default
+data:
+  PORT: "4100"
+  CORS_ORIGIN: "http://36.151.243.117:30081"
+  SESSION_TTL_HOURS: "12"
+  SESSION_COOKIE_NAME: "cie_session"
+  ONECLICK_BASE_URL: "http://amd-oneclick-manager.default.svc.cluster.local"
+  ONECLICK_TIMEOUT_MS: "15000"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cie-reservation-secrets
+  namespace: default
+type: Opaque
+stringData:
+  DATABASE_URL: "postgresql://cie_user:change_me@cie-postgres.default.svc.cluster.local:5432/cie_reservation"
+  ONECLICK_BRIDGE_TOKEN: "change_this_shared_bridge_token"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cie-postgres-data
+  namespace: default
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cie-postgres
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cie-postgres
+  template:
+    metadata:
+      labels:
+        app: cie-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16
+          env:
+            - name: POSTGRES_USER
+              value: cie_user
+            - name: POSTGRES_PASSWORD
+              value: change_me
+            - name: POSTGRES_DB
+              value: cie_reservation
+          ports:
+            - containerPort: 5432
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: postgres-data
+          persistentVolumeClaim:
+            claimName: cie-postgres-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cie-postgres
+  namespace: default
+spec:
+  selector:
+    app: cie-postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cie-reservation-backend
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cie-reservation-backend
+  template:
+    metadata:
+      labels:
+        app: cie-reservation-backend
+    spec:
+      containers:
+        - name: backend
+          image: ghcr.io/your-org/cie-reservation-backend:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 4100
+          envFrom:
+            - configMapRef:
+                name: cie-reservation-config
+            - secretRef:
+                name: cie-reservation-secrets
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 4100
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 4100
+            initialDelaySeconds: 45
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cie-reservation-backend
+  namespace: default
+spec:
+  selector:
+    app: cie-reservation-backend
+  type: NodePort
+  ports:
+    - port: 4100
+      targetPort: 4100
+      nodePort: 30410

@@ -34,6 +34,14 @@ Update `DATABASE_URL` in `.env` to point to your PostgreSQL instance.
 DATABASE_URL=postgresql://cie_user:change_me@localhost:5432/cie_reservation
 ```
 
+For OneClick notebook bridge integration, also configure:
+
+```bash
+ONECLICK_BASE_URL=http://localhost:8000
+ONECLICK_BRIDGE_TOKEN=
+ONECLICK_TIMEOUT_MS=15000
+```
+
 ## 2) Initialize database schema
 
 ```bash
@@ -59,11 +67,14 @@ npm run dev
 
 Default base URL: `http://localhost:4100`
 
+If OneClick is enabled, backend workspace endpoints call `${ONECLICK_BASE_URL}/api/notebook/*`.
+
 ## Default Debug Account
 
 The schema seed creates a default admin user:
 
 - Username: `admin`
+- Email: `admin@local.invalid`
 - Password: `amd1234!`
 
 Team accounts are provisioned by admin (for example via `npm run user:add`).
@@ -76,18 +87,19 @@ Run from `backend/`:
 ### 1) Add or update a user
 
 ```bash
-npm run user:add -- --username team01 --ssh-pubkey "ssh-ed25519 AAAA... team01@host" --password team01pass
+npm run user:add -- --username team01 --email team01@example.com --ssh-pubkey "ssh-ed25519 AAAA... team01@host" --password team01pass
 # or
-npm run user:add -- --username team01 --ssh-pubkey "ssh-ed25519 AAAA... team01@host" --password-hash "$2a$..."
+npm run user:add -- --username team01 --email team01@example.com --ssh-pubkey "ssh-ed25519 AAAA... team01@host" --password-hash "$2a$..."
 ```
 
 Arguments:
-- Required: `--username`, `--ssh-pubkey`, and one of `--password` or `--password-hash`
+- Required: `--username`, `--email`, `--ssh-pubkey`, and one of `--password` or `--password-hash`
 - Optional: `--role team|admin` (default: `team`)
 
 Behavior:
 - If username does not exist, a new user is inserted.
-- If username exists, user is updated (password, `ssh_pubkey`, role) and reactivated (`is_active = TRUE`).
+- If username exists, user is updated (email, password, `ssh_pubkey`, role) and reactivated (`is_active = TRUE`).
+- `email` is stored in `teams.email`.
 - `ssh_pubkey` is stored in `teams.ssh_pubkey`.
 
 Help:
@@ -166,6 +178,8 @@ npm run platform:remove -- --help
 - `POST /api/reservations`
 - `POST /api/reservations/cleanup-expired`
 - `DELETE /api/reservations/:id`
+- `POST /api/workspaces/request`
+- `GET /api/workspaces/status?reservationId=<uuid>`
 
 ## Example Create Reservation Payload
 
@@ -183,3 +197,19 @@ npm run platform:remove -- --help
 ```
 
 `duration` is measured in 1-hour slots.
+
+## Kubernetes Deployment (Optional)
+
+Reservation backend + PostgreSQL sample manifest is provided at:
+
+- `backend/k8s-deployment.yaml`
+
+This deploys:
+
+- `cie-postgres` service (PostgreSQL)
+- `cie-reservation-backend` service (`NodePort: 30410`)
+
+Before applying:
+
+- Build/push backend image and replace `ghcr.io/your-org/cie-reservation-backend:latest`.
+- Update secret values (`DATABASE_URL`, `ONECLICK_BRIDGE_TOKEN`).

@@ -34,14 +34,22 @@ function printUsageAndExit(message, exitCode = 1) {
     console.log(
         [
             'Usage:',
-            '  node scripts/add-user.js --username <name> --ssh-pubkey <ssh_key> (--password <plain_password> | --password-hash <hash>) [--role team|admin]',
+            '  node scripts/add-user.js --username <name> --email <email> --ssh-pubkey <ssh_key> (--password <plain_password> | --password-hash <hash>) [--role team|admin]',
             '',
             'Examples:',
-            "  node scripts/add-user.js --username team01 --password 'team-pass' --ssh-pubkey 'ssh-ed25519 AAAAC3Nza... team01@host'",
-            "  node scripts/add-user.js --username team02 --password-hash '$2a$...' --ssh-pubkey 'ssh-rsa AAAAB3Nza... team02@host'"
+            "  node scripts/add-user.js --username team01 --email team01@example.com --password 'team-pass' --ssh-pubkey 'ssh-ed25519 AAAAC3Nza... team01@host'",
+            "  node scripts/add-user.js --username team02 --email team02@example.com --password-hash '$2a$...' --ssh-pubkey 'ssh-rsa AAAAB3Nza... team02@host'"
         ].join('\n')
     );
     process.exit(exitCode);
+}
+
+function normalizeEmail(value) {
+    return typeof value === 'string' ? value.trim().toLowerCase() : '';
+}
+
+function isValidEmail(email) {
+    return /^[^\s@]+@[^\s@]+$/.test(email);
 }
 
 async function hashPassword(password) {
@@ -60,6 +68,7 @@ async function main() {
     }
 
     const username = typeof args.username === 'string' ? args.username.trim() : '';
+    const email = normalizeEmail(args.email);
     const sshPubkey = typeof args['ssh-pubkey'] === 'string' ? args['ssh-pubkey'].trim() : '';
     const role = typeof args.role === 'string' ? args.role.trim().toLowerCase() : 'team';
     const password = typeof args.password === 'string' ? args.password : null;
@@ -67,6 +76,14 @@ async function main() {
 
     if (!username) {
         printUsageAndExit('--username is required.');
+    }
+
+    if (!email) {
+        printUsageAndExit('--email is required.');
+    }
+
+    if (!isValidEmail(email)) {
+        printUsageAndExit('--email must look like user@domain.');
     }
 
     if (!sshPubkey) {
@@ -88,20 +105,21 @@ async function main() {
     const passwordHash = password ? await hashPassword(password) : passwordHashArg;
 
     const query = `
-        INSERT INTO teams (username, password_hash, ssh_pubkey, role, is_active)
-        VALUES ($1, $2, $3, $4, TRUE)
+        INSERT INTO teams (username, email, password_hash, ssh_pubkey, role, is_active)
+        VALUES ($1, $2, $3, $4, $5, TRUE)
         ON CONFLICT (username) DO UPDATE SET
+            email = EXCLUDED.email,
             password_hash = EXCLUDED.password_hash,
             ssh_pubkey = EXCLUDED.ssh_pubkey,
             role = EXCLUDED.role,
             is_active = TRUE
-        RETURNING id, username, role, is_active
+        RETURNING id, username, email, role, is_active
     `;
 
-    const result = await db.query(query, [username, passwordHash, sshPubkey, role]);
+    const result = await db.query(query, [username, email, passwordHash, sshPubkey, role]);
     const user = result.rows[0];
 
-    console.log(`User upserted: id=${user.id}, username=${user.username}, role=${user.role}, active=${user.is_active}`);
+    console.log(`User upserted: id=${user.id}, username=${user.username}, email=${user.email}, role=${user.role}, active=${user.is_active}`);
 }
 
 main()

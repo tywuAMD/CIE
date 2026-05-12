@@ -1,0 +1,315 @@
+const db = require('../db');
+const config = require('../config');
+const { AppError } = require('../utils/errors');
+const reservationService = require('./reservationService');
+
+function normalizeText(value) {
+    return String(value || '').trim();
+}
+
+function normalizeStatus(status) {
+    const normalized = normalizeText(status).toLowerCase();
+    if (!normalized) return 'unknown';
+
+    if (['ready', 'running'].includes(normalized)) return 'ready';
+    if (['allocating', 'pending', 'loading', 'initializing', 'jupyter_starting'].includes(normalized)) {
+        return normalized;
+    }
+    if (['failed', 'error'].includes(normalized)) return 'failed';
+    if (normalized === 'not_found') return 'not_found';
+    return normalized;
+}
+
+function buildReservationEndAtIso(reservation) {
+    if (!reservation?.date || !reservation?.endTime) {
+        return null;
+    }
+
+    const end = new Date(`${reservation.date}T${reservation.endTime}:00`);
+    if (Number.isNaN(end.getTime())) {
+        return null;
+    }
+
+    return end.toISOString();
+}
+
+function resolveOneClickUrl(path, query = {}) {
+    const baseUrl = normalizeText(config.oneClickBaseUrl).replace(/\/+$/, '');
+    if (!baseUrl) {
+        throw new AppError(500, 'ONECLICK_BASE_URL is not configured.');
+    }
+
+    const url = new URL(path, `${baseUrl}/`);
+    Object.entries(query).forEach(([key, value]) => {
+        const normalizedValue = normalizeText(value);
+        if (normalizedValue) {
+            url.searchParams.set(key, normalizedValue);
+        }
+    });
+    return url.toString();
+}
+
+function buildOneClickHeaders() {
+    const headers = { 'Content-Type': 'application/json' };
+    const token = normalizeText(config.oneClickBridgeToken);
+    if (token) {
+        headers['x-bridge-token'] = token;
+    }
+    return headers;
+}
+
+async function oneClickRequest(path, options = {}) {
+    const method = (options.method || 'GET').toUpperCase();
+    const url = resolveOneClickUrl(path, options.query || {});
+    const controller = new AbortController();
+    const timeoutMs = Number(config.oneClickTimeoutMs) > 0 ? Number(config.oneClickTimeoutMs) : 15000;
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+        const response = await fetch(url, {
+            method,
+            headers: buildOneClickHeaders(),
+            body: options.body ? JSON.stringify(options.body) : undefined,
+            signal: controller.signal
+        });
+
+        const payload = await response.json().catch(() => null);
+        if (!response.ok) {
+            const detail = payload?.detail || payload?.error || `OneClick request failed (${response.status})`;
+            throw new AppError(502, detail);
+        }
+
+        return payload || {};
+    } catch (error) {
+        if (error?.name === 'AbortError') {
+            throw new AppError(504, 'Timed out while contacting OneClick service.');
+        }
+
+        if (error instanceof AppError) {
+            throw error;
+        }
+
+        throw new AppError(502, `Unable to reach OneClick service: ${error.message}`);
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
+function mapWorkspaceRow(row) {
+    return {
+        id: row.id,
+        teamId: row.team_id,
+        reservationId: row.reservation_id,
+        email: row.notebook_email,
+        status: row.notebook_status,
+        message: row.status_message,
+        reservationEndAt: row.reservation_end_at,
+        url: row.notebook_url,
+        source: row.source,
+        launchedAt: row.launched_at,
+        lastSyncedAt: row.last_synced_at,
+        closedAt: row.closed_at
+    };
+}
+
+async function getLatestWorkspaceSession(currentUser, reservationId = '') {
+    if (!currentUser) {
+        throw new AppError(401, 'Authentication required.');
+    }
+
+    const normalizedReservationId = normalizeText(reservationId);
+    const params = [];
+    const clauses = [];
+
+    if (currentUser.role !== 'admin') {
+        params.push(currentUser.id);
+        clauses.push(`ws.team_id = $${params.length}`);
+    } else if (currentUser.id) {
+        params.push(currentUser.id);
+        clauses.push(`ws.team_id = $${params.length}`);
+    }
+
+    if (normalizedReservationId) {
+        params.push(normalizedReservationId);
+        clauses.push(`ws.reservation_id = $${params.length}`);
+    }
+
+    const whereClause = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    const result = await db.query(
+        `SELECT ws.*
+         FROM workspace_sessions ws
+         ${whereClause}
+         ORDER BY ws.launched_at DESC
+         LIMIT 1`,
+        params
+    );
+
+    if (result.rowCount === 0) {
+        return null;
+    }
+
+    return mapWorkspaceRow(result.rows[0]);
+}
+
+async function resolveReservationEntitlement(currentUser, reservationId = '') {
+    const normalizedReservationId = normalizeText(reservationId);
+
+    if (currentUser.role === 'admin' && !normalizedReservationId) {
+        return null;
+    }
+
+    const activeReservation = await reservationService.getActiveReservationForUser(currentUser, normalizedReservationId);
+    if (!activeReservation) {
+        if (normalizedReservationId) {
+            throw new AppError(403, 'Specified reservation is not currently active.');
+        }
+        throw new AppError(403, 'No active reservation. Notebook launch is only allowed during your reserved time.');
+    }
+
+    return activeReservation;
+}
+
+async function saveWorkspaceSession({
+    currentUser,
+    reservationId,
+    reservationEndAt,
+    email,
+    status,
+    message,
+    url
+}) {
+    const result = await db.query(
+        `INSERT INTO workspace_sessions (
+            team_id,
+            reservation_id,
+            notebook_email,
+            notebook_url,
+            notebook_status,
+            status_message,
+            reservation_end_at,
+            source,
+            last_synced_at
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'reservation', NOW())
+         RETURNING *`,
+        [
+            currentUser.id,
+            reservationId || null,
+            email,
+            url || null,
+            status,
+            message || null,
+            reservationEndAt || null
+        ]
+    );
+
+    return mapWorkspaceRow(result.rows[0]);
+}
+
+async function updateWorkspaceSessionStatus(sessionId, payload = {}) {
+    const normalizedStatus = normalizeStatus(payload.status);
+    const shouldClose = ['failed', 'not_found'].includes(normalizedStatus);
+
+    const result = await db.query(
+        `UPDATE workspace_sessions
+         SET notebook_status = $2,
+             status_message = $3,
+             notebook_url = COALESCE($4, notebook_url),
+             last_synced_at = NOW(),
+             closed_at = CASE
+                 WHEN $5::boolean THEN COALESCE(closed_at, NOW())
+                 ELSE closed_at
+             END
+         WHERE id = $1
+         RETURNING *`,
+        [
+            sessionId,
+            normalizedStatus,
+            normalizeText(payload.message) || null,
+            normalizeText(payload.url) || null,
+            shouldClose
+        ]
+    );
+
+    if (result.rowCount === 0) {
+        throw new AppError(404, 'Workspace session not found.');
+    }
+
+    return mapWorkspaceRow(result.rows[0]);
+}
+
+async function requestWorkspace(currentUser, payload = {}) {
+    if (!currentUser) {
+        throw new AppError(401, 'Authentication required.');
+    }
+
+    const reservationId = normalizeText(payload.reservationId);
+    const image = normalizeText(payload.image);
+    const email = normalizeText(currentUser.email).toLowerCase();
+
+    if (!email) {
+        throw new AppError(400, 'Your account is missing email. Ask admin to set team email before launching a notebook.');
+    }
+
+    const entitlement = await resolveReservationEntitlement(currentUser, reservationId);
+    const reservationEndAt = buildReservationEndAtIso(entitlement);
+    const oneClickResponse = await oneClickRequest('/api/notebook/request', {
+        method: 'POST',
+        body: {
+            email,
+            ...(reservationEndAt ? { reservation_end_at: reservationEndAt } : {}),
+            ...(image ? { image } : {})
+        }
+    });
+
+    const workspaceSession = await saveWorkspaceSession({
+        currentUser,
+        reservationId: entitlement?.id || null,
+        reservationEndAt,
+        email,
+        status: normalizeStatus(oneClickResponse.status),
+        message: oneClickResponse.message,
+        url: oneClickResponse.url
+    });
+
+    return {
+        workspace: {
+            ...workspaceSession,
+            reservationId: entitlement?.id || workspaceSession.reservationId,
+            reservation: entitlement || null
+        }
+    };
+}
+
+async function getWorkspaceStatus(currentUser, filters = {}) {
+    if (!currentUser) {
+        throw new AppError(401, 'Authentication required.');
+    }
+
+    const reservationId = normalizeText(filters.reservationId);
+    const existingSession = await getLatestWorkspaceSession(currentUser, reservationId);
+    if (!existingSession) {
+        return {
+            workspace: {
+                status: 'not_found',
+                message: 'No notebook launch found yet.',
+                reservationId: reservationId || null
+            }
+        };
+    }
+
+    const oneClickResponse = await oneClickRequest('/api/notebook/status', {
+        method: 'GET',
+        query: { email: existingSession.email }
+    });
+
+    const updatedSession = await updateWorkspaceSessionStatus(existingSession.id, oneClickResponse);
+    return {
+        workspace: updatedSession
+    };
+}
+
+module.exports = {
+    requestWorkspace,
+    getWorkspaceStatus
+};

@@ -340,11 +340,69 @@ async function cleanupExpiredReservations(currentUser) {
     };
 }
 
+async function getActiveReservationForUser(currentUser, reservationId = '') {
+    if (!currentUser) {
+        throw new AppError(401, 'Authentication required.');
+    }
+
+    const normalizedReservationId = normalizeText(reservationId);
+    const clauses = [
+        '(r.reservation_date::timestamp + r.start_time) <= NOW()',
+        'NOW() < (r.reservation_date::timestamp + r.end_time)'
+    ];
+    const params = [];
+
+    if (currentUser.role !== 'admin') {
+        params.push(currentUser.id);
+        clauses.push(`r.team_id = $${params.length}`);
+    }
+
+    if (normalizedReservationId) {
+        params.push(normalizedReservationId);
+        clauses.push(`r.id = $${params.length}`);
+    }
+
+    const result = await db.query(
+        `SELECT r.id,
+                r.team_id,
+                r.reservation_date::text AS date,
+                r.start_time::text AS start_time,
+                r.end_time::text AS end_time,
+                r.duration_hours,
+                p.name AS platform,
+                t.username AS owner
+         FROM reservations r
+         JOIN platforms p ON p.id = r.platform_id
+         LEFT JOIN teams t ON t.id = r.team_id
+         WHERE ${clauses.join(' AND ')}
+         ORDER BY r.reservation_date DESC, r.start_time DESC
+         LIMIT 1`,
+        params
+    );
+
+    if (result.rowCount === 0) {
+        return null;
+    }
+
+    const row = result.rows[0];
+    return {
+        id: row.id,
+        teamId: row.team_id,
+        owner: row.owner || null,
+        platform: row.platform,
+        date: row.date,
+        time: toHourMinute(row.start_time),
+        endTime: toHourMinute(row.end_time),
+        duration: row.duration_hours
+    };
+}
+
 module.exports = {
     getPlatforms,
     getAvailability,
     listReservations,
     createReservation,
     deleteReservation,
-    cleanupExpiredReservations
+    cleanupExpiredReservations,
+    getActiveReservationForUser
 };

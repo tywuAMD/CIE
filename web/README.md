@@ -14,12 +14,16 @@ This frontend now uses the backend API + PostgreSQL for real multi-user reservat
 - Conflict-safe booking and cancellation
 - Upcoming reservations list synced from backend account session
 - Expired reservations are auto-cleaned on page refresh/login
+- Active reservation can launch/open OneClick notebook workspace
 
 ## Runtime Architecture
 
 - `web/script.js` fetches data from backend API
 - No browser `localStorage` reservation persistence is used anymore
 - Backend source of truth is PostgreSQL (`backend/db/schema.sql`)
+- Workspace launch/status uses backend bridge endpoints:
+  - `POST /api/workspaces/request`
+  - `GET /api/workspaces/status`
 
 ## Run the Full System
 

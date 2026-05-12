@@ -196,8 +196,13 @@
 
     <script>
         (function configureApiBaseUrl() {
+            if (window.RESERVATION_API_BASE_URL) {
+                return;
+            }
             const host = window.location.hostname || 'localhost';
-            window.RESERVATION_API_BASE_URL = `http://${host}:4100/api`;
+            const port = window.RESERVATION_API_PORT || '4100';
+            const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:';
+            window.RESERVATION_API_BASE_URL = `${protocol}//${host}:${port}/api`;
         })();
     </script>
     <script src="script.js"></script>
