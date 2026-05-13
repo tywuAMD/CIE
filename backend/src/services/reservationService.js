@@ -15,6 +15,18 @@ function normalizeText(value) {
     return String(value || '').trim();
 }
 
+function normalizePlatformKey(value) {
+    return normalizeText(value).toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+const temporarilyUnavailablePlatformKeys = new Set(
+    ['node#2', 'node2'].map((name) => normalizePlatformKey(name))
+);
+
+function isPlatformTemporarilyUnavailable(platformName) {
+    return temporarilyUnavailablePlatformKeys.has(normalizePlatformKey(platformName));
+}
+
 async function getPlatformByName(platformName, client = db) {
     const result = await client.query(
         `SELECT id, name
@@ -28,7 +40,12 @@ async function getPlatformByName(platformName, client = db) {
         throw new AppError(404, `Platform "${platformName}" was not found.`);
     }
 
-    return result.rows[0];
+    const platformRow = result.rows[0];
+    if (isPlatformTemporarilyUnavailable(platformRow.name)) {
+        throw new AppError(409, `Platform "${platformRow.name}" is temporarily unavailable while NodeB is down.`);
+    }
+
+    return platformRow;
 }
 
 async function getPlatforms() {
@@ -39,7 +56,15 @@ async function getPlatforms() {
          ORDER BY name`
     );
 
-    return result.rows;
+    return result.rows.map((row) => {
+        const isAvailable = !isPlatformTemporarilyUnavailable(row.name);
+        return {
+            id: row.id,
+            name: row.name,
+            isAvailable,
+            unavailableReason: isAvailable ? null : 'NodeB is down'
+        };
+    });
 }
 
 async function getAvailability(platform, date) {
