@@ -292,6 +292,17 @@ section h2 {
     color: var(--text-secondary);
 }
 
+#oneClickAdminLink {
+    margin-left: 0.4rem;
+    font-weight: 600;
+}
+
+#oneClickAdminLink::before {
+    content: "| ";
+    color: var(--text-secondary);
+    font-weight: 400;
+}
+
 .reservation-limit-note {
     margin-top: -0.35rem;
     margin-bottom: 1rem;
@@ -470,6 +481,32 @@ section h2 {
     color: white;
     border-color: var(--primary-color);
     box-shadow: 0 8px 20px rgba(237, 28, 36, 0.35);
+}
+
+.platform-card.unavailable {
+    background: linear-gradient(180deg, #2b2f36, #21252c);
+    border-color: #4b5563;
+    color: #a0aec0;
+    cursor: not-allowed;
+    box-shadow: none;
+}
+
+.platform-card.unavailable:hover {
+    transform: none;
+    border-color: #4b5563;
+    box-shadow: none;
+}
+
+.platform-card.unavailable.selected {
+    background: linear-gradient(180deg, #2b2f36, #21252c);
+    border-color: #4b5563;
+    color: #a0aec0;
+    box-shadow: none;
+}
+
+.platform-card.unavailable .platform-status {
+    opacity: 1;
+    color: #cbd5e1;
 }
 
 .platform-card .platform-name {

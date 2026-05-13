@@ -20,6 +20,7 @@ class ReservationSystem {
         this.workspacePollingTimer = null;
         this.workspacePollInFlight = false;
         this.workspacePollingIntervalMs = 4000;
+        this.unavailablePlatformKeys = new Set(['node#2', 'node2'].map((name) => this.normalizePlatformKey(name)));
 
         this.init().catch((error) => {
             console.error('Initialization error:', error);
@@ -177,13 +178,32 @@ class ReservationSystem {
 
         if (!this.currentUser) {
             userLabel.textContent = 'Not signed in';
+            this.updateHeaderActions();
             this.updateReservationsScopeHint();
             return;
         }
 
         const roleSuffix = this.currentUser.role === 'admin' ? ' (Admin)' : '';
         userLabel.textContent = `${this.currentUser.username}${roleSuffix}`;
+        this.updateHeaderActions();
         this.updateReservationsScopeHint();
+    }
+
+    updateHeaderActions() {
+        const headerHintText = document.getElementById('headerHintText');
+        const oneClickAdminLink = document.getElementById('oneClickAdminLink');
+        const normalizedUsername = String(this.currentUser?.username || '').trim().toLowerCase();
+        const isAdminUser = normalizedUsername === 'admin' || this.currentUser?.role === 'admin';
+
+        if (headerHintText) {
+            headerHintText.textContent = isAdminUser
+                ? 'Reserve platforms and launch notebooks from active reservations. Admin tools are available below.'
+                : 'Reserve platforms and launch notebooks from active reservations.';
+        }
+
+        if (oneClickAdminLink) {
+            oneClickAdminLink.classList.toggle('hidden', !isAdminUser);
+        }
     }
 
     updateReservationsScopeHint() {
@@ -376,18 +396,34 @@ class ReservationSystem {
         }
 
         this.platforms.forEach(platform => {
+            const isUnavailable = this.isPlatformTemporarilyUnavailable(platform);
             const card = document.createElement('div');
-            card.className = 'platform-card';
+            card.className = `platform-card${isUnavailable ? ' unavailable' : ''}`;
             card.innerHTML = `
                 <span class="platform-name">${platform}</span>
-                <span class="platform-status">Available</span>
+                <span class="platform-status">${isUnavailable ? 'Unavailable (NodeB down)' : 'Available'}</span>
             `;
-            card.addEventListener('click', () => this.selectPlatform(platform));
+
+            if (!isUnavailable) {
+                if (this.selectedPlatform === platform) {
+                    card.classList.add('selected');
+                }
+                card.addEventListener('click', () => this.selectPlatform(platform));
+            } else {
+                card.setAttribute('aria-disabled', 'true');
+                card.title = `${platform} is temporarily unavailable while NodeB is down.`;
+            }
+
             container.appendChild(card);
         });
     }
 
     selectPlatform(platform) {
+        if (this.isPlatformTemporarilyUnavailable(platform)) {
+            this.showSyncError(`${platform} is temporarily unavailable while NodeB is down.`);
+            return;
+        }
+
         this.selectedPlatform = platform;
         this.pendingSlotStartTime = null;
         this.selectedStartTime = null;
@@ -432,6 +468,7 @@ class ReservationSystem {
         const form = document.getElementById('reservationForm');
         const cancelConfirmBtn = document.getElementById('cancelConfirmBtn');
         const closeModal = document.getElementById('closeModal');
+        const reservationsList = document.getElementById('reservationsList');
 
         loginForm.addEventListener('submit', (e) => this.handleLoginSubmit(e));
         resetPasswordForm.addEventListener('submit', (e) => this.handleResetPasswordSubmit(e));
@@ -461,6 +498,25 @@ class ReservationSystem {
                 }
             });
         });
+
+        if (reservationsList) {
+            reservationsList.addEventListener('click', (event) => {
+                const interactiveTarget = event.target.closest('button, a, input, select, textarea, label');
+                if (interactiveTarget) {
+                    return;
+                }
+
+                const card = event.target.closest('.reservation-card.clickable[data-reservation-id]');
+                if (!card) {
+                    return;
+                }
+
+                const reservationId = card.dataset.reservationId;
+                if (reservationId) {
+                    this.handleActiveReservationCardClick(reservationId);
+                }
+            });
+        }
 
         document.addEventListener('keydown', (event) => {
             if (event.key !== 'Escape') return;
@@ -709,8 +765,9 @@ class ReservationSystem {
 
     updateReservationSectionVisibility() {
         const reservationSection = document.getElementById('reservationSection');
-        
-        if (this.selectedPlatform && this.selectedDate) {
+        const selectedPlatformUnavailable = this.isPlatformTemporarilyUnavailable(this.selectedPlatform);
+
+        if (this.selectedPlatform && this.selectedDate && !selectedPlatformUnavailable) {
             reservationSection.style.display = 'block';
             this.renderTimeSlots();
         } else {
@@ -750,6 +807,15 @@ class ReservationSystem {
         const newHours = Math.floor(totalMinutes / 60) % 24;
         const newMinutes = totalMinutes % 60;
         return `${String(newHours).padStart(2, '0')}:${String(newMinutes).padStart(2, '0')}`;
+    }
+
+    normalizePlatformKey(platformName) {
+        return String(platformName || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    }
+
+    isPlatformTemporarilyUnavailable(platformName) {
+        const normalizedKey = this.normalizePlatformKey(platformName);
+        return this.unavailablePlatformKeys.has(normalizedKey);
     }
 
     timeToMinutes(time) {
@@ -970,6 +1036,7 @@ class ReservationSystem {
         }
 
         if (this.isWorkspacePendingStatus(status)) {
+            this.showSyncError('Notebook is still launching. Please wait a moment and click again.');
             return;
         }
 
@@ -1102,6 +1169,15 @@ class ReservationSystem {
                 className: 'pending',
                 label: 'Waiting',
                 note: 'Select a platform to continue.',
+                isReady: false
+            };
+        }
+
+        if (this.isPlatformTemporarilyUnavailable(this.selectedPlatform)) {
+            return {
+                className: 'conflict',
+                label: 'Unavailable',
+                note: `${this.selectedPlatform} is temporarily unavailable while NodeB is down.`,
                 isReady: false
             };
         }
@@ -1777,11 +1853,6 @@ class ReservationSystem {
             sortedReservations
                 .filter((reservation) => this.getReservationVisualState(reservation) === 'active')
                 .forEach((reservation) => {
-                    const card = document.getElementById(`reservation-card-${reservation.id}`);
-                    if (card) {
-                        card.addEventListener('click', () => this.handleActiveReservationCardClick(reservation.id));
-                    }
-
                     const launchBtn = document.getElementById(`launch-${reservation.id}`);
                     if (launchBtn) {
                         launchBtn.addEventListener('click', (event) => {
@@ -1823,7 +1894,7 @@ class ReservationSystem {
         const workspaceActions = showWorkspaceActions ? this.renderWorkspaceActions(reservation) : '';
         const clickableClass = showWorkspaceActions ? 'clickable' : '';
         return `
-            <div class="reservation-card ${reservationState} ${clickableClass}" id="reservation-card-${reservation.id}">
+            <div class="reservation-card ${reservationState} ${clickableClass}" id="reservation-card-${reservation.id}" data-reservation-id="${reservation.id}">
                 <div class="reservation-card-head">
                     <div class="reservation-card-head-left">
                         <span class="reservation-platform ${reservationState}">${reservation.platform}</span>
