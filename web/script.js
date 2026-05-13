@@ -872,16 +872,52 @@ class ReservationSystem {
         return ['allocating', 'pending', 'loading', 'initializing', 'jupyter_starting', 'running'].includes(normalized);
     }
 
+    normalizeUserKey(value) {
+        return String(value || '').trim().toLowerCase();
+    }
+
+    isReservationOwnedByCurrentUser(reservation) {
+        if (!this.currentUser) {
+            return false;
+        }
+
+        const currentUserKey = this.normalizeUserKey(this.currentUser.username);
+        if (!currentUserKey) {
+            return false;
+        }
+
+        const ownerKey = this.normalizeUserKey(reservation?.owner);
+        const reservationNameKey = this.normalizeUserKey(reservation?.name);
+        return ownerKey === currentUserKey || reservationNameKey === currentUserKey;
+    }
+
+    canUseWorkspaceActionsForReservation(reservation) {
+        if (!this.currentUser) {
+            return false;
+        }
+
+        const isActive = this.getReservationVisualState(reservation) === 'active';
+        if (!isActive) {
+            return false;
+        }
+
+        if (this.currentUser.role === 'admin') {
+            return this.isReservationOwnedByCurrentUser(reservation);
+        }
+
+        return true;
+    }
+
     getActiveReservationsForWorkspace() {
-        if (!this.currentUser || this.currentUser.role === 'admin') {
+        if (!this.currentUser) {
             return [];
         }
 
-        return this.reservations.filter((reservation) => this.getReservationVisualState(reservation) === 'active');
+        return this.reservations.filter((reservation) => this.canUseWorkspaceActionsForReservation(reservation));
     }
 
     async syncWorkspaceStatusesForActiveReservations(options = {}) {
-        if (!this.currentUser || this.currentUser.role === 'admin') {
+        if (!this.currentUser) {
             if (this.workspaceStatusByReservation.size > 0) {
                 this.workspaceStatusByReservation.clear();
             }
@@ -1849,9 +1885,9 @@ class ReservationSystem {
             }
         });
 
-        if (this.currentUser?.role !== 'admin') {
+        if (this.currentUser) {
             sortedReservations
-                .filter((reservation) => this.getReservationVisualState(reservation) === 'active')
+                .filter((reservation) => this.canUseWorkspaceActionsForReservation(reservation))
                 .forEach((reservation) => {
                     const launchBtn = document.getElementById(`launch-${reservation.id}`);
                     if (launchBtn) {
@@ -1881,7 +1917,7 @@ class ReservationSystem {
         const ownerLabel = reservation.owner || reservation.name || 'Unknown team';
         const reservationState = this.getReservationVisualState(reservation);
         const reservationStateLabel = reservationState === 'active' ? 'Active now' : 'Upcoming';
-        const showWorkspaceActions = reservationState === 'active' && !isAdmin;
+        const showWorkspaceActions = this.canUseWorkspaceActionsForReservation(reservation);
         const workspace = this.workspaceStatusByReservation.get(reservation.id) || null;
         const workspaceStatus = String(workspace?.status || '').toLowerCase();
         const cardActionHint = showWorkspaceActions
