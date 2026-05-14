@@ -508,10 +508,8 @@ class ReservationSystem {
                     if (launchBtn.disabled) {
                         return;
                     }
-                    const reservationId = launchBtn.dataset.reservationId;
-                    if (reservationId) {
-                        this.handleLaunchWorkspace(reservationId);
-                    }
+                    const reservationId = this.normalizeReservationId(launchBtn.dataset.reservationId);
+                    this.handleLaunchWorkspace(reservationId);
                     return;
                 }
 
@@ -522,10 +520,8 @@ class ReservationSystem {
                     if (openBtn.disabled) {
                         return;
                     }
-                    const reservationId = openBtn.dataset.reservationId;
-                    if (reservationId) {
-                        this.openWorkspaceForReservation(reservationId);
-                    }
+                    const reservationId = this.normalizeReservationId(openBtn.dataset.reservationId);
+                    this.openWorkspaceForReservation(reservationId);
                     return;
                 }
 
@@ -540,9 +536,7 @@ class ReservationSystem {
                 }
 
                 const reservationId = card.dataset.reservationId;
-                if (reservationId) {
-                    this.handleActiveReservationCardClick(reservationId);
-                }
+                this.handleActiveReservationCardClick(this.normalizeReservationId(reservationId));
             });
         }
 
@@ -904,6 +898,20 @@ class ReservationSystem {
         return String(value || '').trim().toLowerCase();
     }
 
+    normalizeReservationId(value) {
+        return String(value || '').trim();
+    }
+
+    isUuidReservationId(value) {
+        const normalized = this.normalizeReservationId(value);
+        return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(normalized);
+    }
+
+    getValidReservationId(value) {
+        const normalized = this.normalizeReservationId(value);
+        return this.isUuidReservationId(normalized) ? normalized : '';
+    }
+
     isReservationOwnedByCurrentUser(reservation) {
         if (!this.currentUser) {
             return false;
@@ -958,7 +966,11 @@ class ReservationSystem {
         }
 
         const activeReservations = this.getActiveReservationsForWorkspace();
-        const activeIds = new Set(activeReservations.map((reservation) => reservation.id));
+        const activeIds = new Set(
+            activeReservations
+                .map((reservation) => this.getValidReservationId(reservation.id))
+                .filter(Boolean)
+        );
 
         Array.from(this.workspaceStatusByReservation.keys()).forEach((reservationId) => {
             if (!activeIds.has(reservationId)) {
@@ -977,21 +989,26 @@ class ReservationSystem {
         try {
             await Promise.all(
                 activeReservations.map(async (reservation) => {
+                    const reservationId = this.getValidReservationId(reservation.id);
+                    if (!reservationId) {
+                        return;
+                    }
+
                     try {
-                        const query = new URLSearchParams({ reservationId: reservation.id });
+                        const query = new URLSearchParams({ reservationId });
                         const payload = await this.apiRequest(`/workspaces/status?${query.toString()}`);
                         const workspace = payload?.workspace;
 
                         if (!workspace || workspace.status === 'not_found') {
-                            if (this.workspaceStatusByReservation.delete(reservation.id)) {
+                            if (this.workspaceStatusByReservation.delete(reservationId)) {
                                 changed = true;
                             }
                             return;
                         }
 
-                        const previous = this.workspaceStatusByReservation.get(reservation.id);
+                        const previous = this.workspaceStatusByReservation.get(reservationId);
                         if (JSON.stringify(previous || null) !== JSON.stringify(workspace)) {
-                            this.workspaceStatusByReservation.set(reservation.id, workspace);
+                            this.workspaceStatusByReservation.set(reservationId, workspace);
                             changed = true;
                         }
                     } catch (error) {
@@ -1042,7 +1059,11 @@ class ReservationSystem {
         }
 
         const hasPending = activeReservations.some((reservation) => {
-            const workspace = this.workspaceStatusByReservation.get(reservation.id);
+            const reservationId = this.getValidReservationId(reservation.id);
+            if (!reservationId) {
+                return false;
+            }
+            const workspace = this.workspaceStatusByReservation.get(reservationId);
             return this.isWorkspacePendingStatus(workspace?.status);
         });
 
@@ -1054,17 +1075,29 @@ class ReservationSystem {
     }
 
     async handleLaunchWorkspace(reservationId) {
+        const normalizedReservationId = this.normalizeReservationId(reservationId);
+        const validReservationId = this.getValidReservationId(normalizedReservationId);
+        const isAdmin = this.currentUser?.role === 'admin';
+
+        if (normalizedReservationId && !validReservationId && isAdmin) {
+            this.showSyncError('Invalid reservation identifier for admin launch. Refresh the page and try again.');
+            return;
+        }
+
+        const requestBody = validReservationId ? { reservationId: validReservationId } : {};
+
         try {
             const payload = await this.apiRequest('/workspaces/request', {
                 method: 'POST',
-                body: JSON.stringify({ reservationId })
+                body: JSON.stringify(requestBody)
             });
             const workspace = payload?.workspace;
+            const workspaceReservationId = this.getValidReservationId(workspace?.reservationId) || validReservationId;
 
-            if (workspace && workspace.status !== 'not_found') {
-                this.workspaceStatusByReservation.set(reservationId, workspace);
-            } else {
-                this.workspaceStatusByReservation.delete(reservationId);
+            if (workspace && workspace.status !== 'not_found' && workspaceReservationId) {
+                this.workspaceStatusByReservation.set(workspaceReservationId, workspace);
+            } else if (workspaceReservationId) {
+                this.workspaceStatusByReservation.delete(workspaceReservationId);
             }
 
             this.renderReservationsList();
@@ -1079,7 +1112,8 @@ class ReservationSystem {
     }
 
     openWorkspaceForReservation(reservationId) {
-        const workspace = this.workspaceStatusByReservation.get(reservationId);
+        const validReservationId = this.getValidReservationId(reservationId);
+        const workspace = validReservationId ? this.workspaceStatusByReservation.get(validReservationId) : null;
         const url = workspace?.url;
 
         if (!url) {
@@ -1091,11 +1125,12 @@ class ReservationSystem {
     }
 
     async handleActiveReservationCardClick(reservationId) {
-        const workspace = this.workspaceStatusByReservation.get(reservationId) || null;
+        const validReservationId = this.getValidReservationId(reservationId);
+        const workspace = validReservationId ? (this.workspaceStatusByReservation.get(validReservationId) || null) : null;
         const status = String(workspace?.status || '').toLowerCase();
 
         if (status === 'ready' && workspace?.url) {
-            this.openWorkspaceForReservation(reservationId);
+            this.openWorkspaceForReservation(validReservationId);
             return;
         }
 
@@ -1104,11 +1139,13 @@ class ReservationSystem {
             return;
         }
 
-        await this.handleLaunchWorkspace(reservationId);
+        await this.handleLaunchWorkspace(validReservationId || reservationId);
     }
 
     renderWorkspaceActions(reservation) {
-        const workspace = this.workspaceStatusByReservation.get(reservation.id) || null;
+        const reservationId = this.normalizeReservationId(reservation.id);
+        const validReservationId = this.getValidReservationId(reservationId);
+        const workspace = validReservationId ? (this.workspaceStatusByReservation.get(validReservationId) || null) : null;
         const statusMeta = this.getWorkspaceStatusMeta(workspace);
         const isPending = this.isWorkspacePendingStatus(workspace?.status);
         const hasUrl = Boolean(workspace?.url);
@@ -1121,8 +1158,8 @@ class ReservationSystem {
                     <div class="workspace-status-message">${statusMeta.message}</div>
                 </div>
                 <div class="workspace-actions">
-                    <button type="button" class="workspace-btn launch-btn" id="launch-${reservation.id}" data-reservation-id="${reservation.id}" ${isPending ? 'disabled' : ''}>${launchLabel}</button>
-                    <button type="button" class="workspace-btn open-btn" id="open-${reservation.id}" data-reservation-id="${reservation.id}" ${hasUrl ? '' : 'disabled'}>Open Notebook</button>
+                    <button type="button" class="workspace-btn launch-btn" id="launch-${reservationId}" data-reservation-id="${reservationId}" ${isPending ? 'disabled' : ''}>${launchLabel}</button>
+                    <button type="button" class="workspace-btn open-btn" id="open-${reservationId}" data-reservation-id="${reservationId}" ${hasUrl ? '' : 'disabled'}>Open Notebook</button>
                 </div>
             </div>
         `;
@@ -1937,7 +1974,8 @@ class ReservationSystem {
 
         // Add delete button event listeners
         sortedReservations.forEach(reservation => {
-            const deleteBtn = document.getElementById(`delete-${reservation.id}`);
+            const reservationId = this.normalizeReservationId(reservation.id);
+            const deleteBtn = document.getElementById(`delete-${reservationId}`);
             if (deleteBtn) {
                 deleteBtn.addEventListener('click', (event) => {
                     event.stopPropagation();
@@ -1951,6 +1989,8 @@ class ReservationSystem {
     }
 
     createReservationCard(reservation) {
+        const reservationId = this.normalizeReservationId(reservation.id);
+        const validReservationId = this.getValidReservationId(reservationId);
         const endTime = this.addHoursToTime(reservation.time, reservation.duration);
         const isAdmin = this.currentUser?.role === 'admin';
         const ownerLabel = reservation.owner || reservation.name || 'Unknown team';
@@ -1962,7 +2002,7 @@ class ReservationSystem {
         };
         const reservationStateLabel = reservationStateLabelMap[reservationState] || 'Upcoming';
         const showWorkspaceActions = this.canUseWorkspaceActionsForReservation(reservation);
-        const workspace = this.workspaceStatusByReservation.get(reservation.id) || null;
+        const workspace = validReservationId ? (this.workspaceStatusByReservation.get(validReservationId) || null) : null;
         const workspaceStatus = String(workspace?.status || '').toLowerCase();
         const cardActionHint = showWorkspaceActions
             ? (workspaceStatus === 'ready' && workspace?.url
@@ -1974,13 +2014,13 @@ class ReservationSystem {
         const workspaceActions = showWorkspaceActions ? this.renderWorkspaceActions(reservation) : '';
         const clickableClass = showWorkspaceActions ? 'clickable' : '';
         return `
-            <div class="reservation-card ${reservationState} ${clickableClass}" id="reservation-card-${reservation.id}" data-reservation-id="${reservation.id}">
+            <div class="reservation-card ${reservationState} ${clickableClass}" id="reservation-card-${reservationId}" data-reservation-id="${reservationId}">
                 <div class="reservation-card-head">
                     <div class="reservation-card-head-left">
                         <span class="reservation-platform ${reservationState}">${reservation.platform}</span>
                         <span class="reservation-date">${this.formatDateDisplay(reservation.date)}</span>
                     </div>
-                    <button class="delete-btn" id="delete-${reservation.id}" title="Cancel reservation">Cancel</button>
+                    <button class="delete-btn" id="delete-${reservationId}" title="Cancel reservation">Cancel</button>
                 </div>
                 <div class="reservation-time">${this.formatTime(reservation.time)} - ${this.formatTime(endTime)}</div>
                 <div class="reservation-meta">

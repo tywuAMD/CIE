@@ -7,6 +7,17 @@ function normalizeText(value) {
     return String(value || '').trim();
 }
 
+function isUuid(value) {
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+        normalizeText(value)
+    );
+}
+
+function normalizeReservationId(value) {
+    const normalized = normalizeText(value);
+    return isUuid(normalized) ? normalized : '';
+}
+
 function normalizeStatus(status) {
     const normalized = normalizeText(status).toLowerCase();
     if (!normalized) return 'unknown';
@@ -117,7 +128,7 @@ async function getLatestWorkspaceSession(currentUser, reservationId = '') {
         throw new AppError(401, 'Authentication required.');
     }
 
-    const normalizedReservationId = normalizeText(reservationId);
+    const normalizedReservationId = normalizeReservationId(reservationId);
     const params = [];
     const clauses = [];
 
@@ -178,6 +189,8 @@ async function saveWorkspaceSession({
     message,
     url
 }) {
+    const normalizedReservationId = normalizeReservationId(reservationId) || null;
+
     const result = await db.query(
         `INSERT INTO workspace_sessions (
             team_id,
@@ -194,7 +207,7 @@ async function saveWorkspaceSession({
          RETURNING *`,
         [
             currentUser.id,
-            reservationId || null,
+            normalizedReservationId,
             email,
             url || null,
             status,
@@ -243,9 +256,14 @@ async function requestWorkspace(currentUser, payload = {}) {
         throw new AppError(401, 'Authentication required.');
     }
 
-    const reservationId = normalizeText(payload.reservationId);
+    const rawReservationId = normalizeText(payload.reservationId);
+    const reservationId = normalizeReservationId(rawReservationId);
     const image = normalizeText(payload.image);
     const email = normalizeText(currentUser.email).toLowerCase();
+
+    if (rawReservationId && !reservationId && currentUser.role === 'admin') {
+        throw new AppError(400, 'Invalid reservation identifier. Refresh the page and try again.');
+    }
 
     if (!email) {
         throw new AppError(400, 'Your account is missing email. Ask admin to set team email before launching a notebook.');
@@ -286,7 +304,17 @@ async function getWorkspaceStatus(currentUser, filters = {}) {
         throw new AppError(401, 'Authentication required.');
     }
 
-    const reservationId = normalizeText(filters.reservationId);
+    const rawReservationId = normalizeText(filters.reservationId);
+    const reservationId = normalizeReservationId(rawReservationId);
+    if (rawReservationId && !reservationId) {
+        return {
+            workspace: {
+                status: 'not_found',
+                message: 'Reservation identifier is invalid. Refresh the page.',
+                reservationId: null
+            }
+        };
+    }
     const existingSession = await getLatestWorkspaceSession(currentUser, reservationId);
     if (!existingSession) {
         return {
