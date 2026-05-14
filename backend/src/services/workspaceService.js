@@ -18,6 +18,50 @@ function normalizeReservationId(value) {
     return isUuid(normalized) ? normalized : '';
 }
 
+function isValidNotebookEmail(value) {
+    const normalized = normalizeText(value).toLowerCase();
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized);
+}
+
+function formatOneClickErrorDetail(detail) {
+    if (Array.isArray(detail)) {
+        const messages = detail
+            .map((item) => {
+                if (!item || typeof item !== 'object') {
+                    return normalizeText(item);
+                }
+
+                const message = normalizeText(item.msg) || normalizeText(item.message);
+                const location = Array.isArray(item.loc) && item.loc.length
+                    ? ` (${item.loc.join('.')})`
+                    : '';
+
+                if (message) {
+                    return `${message}${location}`;
+                }
+
+                try {
+                    return JSON.stringify(item);
+                } catch (_error) {
+                    return String(item);
+                }
+            })
+            .filter(Boolean);
+
+        return messages.join('; ');
+    }
+
+    if (detail && typeof detail === 'object') {
+        try {
+            return JSON.stringify(detail);
+        } catch (_error) {
+            return String(detail);
+        }
+    }
+
+    return normalizeText(detail);
+}
+
 function normalizeStatus(status) {
     const normalized = normalizeText(status).toLowerCase();
     if (!normalized) return 'unknown';
@@ -86,8 +130,13 @@ async function oneClickRequest(path, options = {}) {
 
         const payload = await response.json().catch(() => null);
         if (!response.ok) {
-            const detail = payload?.detail || payload?.error || `OneClick request failed (${response.status})`;
-            throw new AppError(502, detail);
+            const detail = formatOneClickErrorDetail(
+                payload?.detail || payload?.error || payload?.message || ''
+            );
+            const message = detail
+                ? `OneClick API ${response.status}: ${detail}`
+                : `OneClick request failed (${response.status})`;
+            throw new AppError(502, message, payload);
         }
 
         return payload || {};
@@ -267,6 +316,13 @@ async function requestWorkspace(currentUser, payload = {}) {
 
     if (!email) {
         throw new AppError(400, 'Your account is missing email. Ask admin to set team email before launching a notebook.');
+    }
+
+    if (!isValidNotebookEmail(email)) {
+        throw new AppError(
+            400,
+            `Your account email "${email}" is invalid for notebook launch. Ask admin to set a valid email (e.g. team01@example.com).`
+        );
     }
 
     const entitlement = await resolveReservationEntitlement(currentUser, reservationId);
