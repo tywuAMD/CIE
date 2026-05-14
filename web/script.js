@@ -501,6 +501,34 @@ class ReservationSystem {
 
         if (reservationsList) {
             reservationsList.addEventListener('click', (event) => {
+                const launchBtn = event.target.closest('.workspace-btn.launch-btn[data-reservation-id]');
+                if (launchBtn) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    if (launchBtn.disabled) {
+                        return;
+                    }
+                    const reservationId = launchBtn.dataset.reservationId;
+                    if (reservationId) {
+                        this.handleLaunchWorkspace(reservationId);
+                    }
+                    return;
+                }
+
+                const openBtn = event.target.closest('.workspace-btn.open-btn[data-reservation-id]');
+                if (openBtn) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    if (openBtn.disabled) {
+                        return;
+                    }
+                    const reservationId = openBtn.dataset.reservationId;
+                    if (reservationId) {
+                        this.openWorkspaceForReservation(reservationId);
+                    }
+                    return;
+                }
+
                 const interactiveTarget = event.target.closest('button, a, input, select, textarea, label');
                 if (interactiveTarget) {
                     return;
@@ -1093,8 +1121,8 @@ class ReservationSystem {
                     <div class="workspace-status-message">${statusMeta.message}</div>
                 </div>
                 <div class="workspace-actions">
-                    <button class="workspace-btn launch-btn" id="launch-${reservation.id}" ${isPending ? 'disabled' : ''}>${launchLabel}</button>
-                    <button class="workspace-btn open-btn" id="open-${reservation.id}" ${hasUrl ? '' : 'disabled'}>Open Notebook</button>
+                    <button type="button" class="workspace-btn launch-btn" id="launch-${reservation.id}" data-reservation-id="${reservation.id}" ${isPending ? 'disabled' : ''}>${launchLabel}</button>
+                    <button type="button" class="workspace-btn open-btn" id="open-${reservation.id}" data-reservation-id="${reservation.id}" ${hasUrl ? '' : 'disabled'}>Open Notebook</button>
                 </div>
             </div>
         `;
@@ -1115,7 +1143,13 @@ class ReservationSystem {
 
         const end = new Date(start.getTime() + (durationHours * 60 * 60 * 1000));
         const now = new Date();
-        return now >= start && now < end ? 'active' : 'upcoming';
+        if (now >= end) {
+            return 'inactive';
+        }
+        if (now >= start) {
+            return 'active';
+        }
+        return 'upcoming';
     }
 
     isDateToday(dateString) {
@@ -1400,6 +1434,36 @@ class ReservationSystem {
         this.selectedDuration = null;
         this.pendingSlotStartTime = null;
         this.clearAvailabilityMessage();
+        this.updateReservationSectionVisibility();
+        this.updateSelectionSummary();
+        this.updateActionState();
+    }
+
+    resetSelectionSummary() {
+        const reservationForm = document.getElementById('reservationForm');
+        const dateInput = document.getElementById('dateInput');
+        const platformCards = document.querySelectorAll('.platform-card');
+
+        if (reservationForm) {
+            reservationForm.reset();
+        }
+        if (dateInput) {
+            dateInput.value = '';
+        }
+
+        platformCards.forEach((card) => card.classList.remove('selected'));
+
+        this.selectedPlatform = null;
+        this.selectedDate = null;
+        this.pendingSlotStartTime = null;
+        this.selectedStartTime = null;
+        this.selectedDuration = null;
+        this.selectedDayReservations = [];
+        this.selectedDayBookedHours = new Set();
+        this.isLoadingAvailability = false;
+
+        this.clearAvailabilityMessage();
+        this.updateQuickDateButtonState();
         this.updateReservationSectionVisibility();
         this.updateSelectionSummary();
         this.updateActionState();
@@ -1808,11 +1872,8 @@ class ReservationSystem {
             // Show success modal
             this.showSuccessModal(reservation);
 
-            // Reset form and selections
-            document.getElementById('reservationForm').reset();
-            this.selectedStartTime = null;
-            this.selectedDuration = null;
-            this.clearSelection();
+            // Reset summary and selection state back to default
+            this.resetSelectionSummary();
         } catch (error) {
             if (this.handleUnauthorized(error)) {
                 return;
@@ -1885,28 +1946,6 @@ class ReservationSystem {
             }
         });
 
-        if (this.currentUser) {
-            sortedReservations
-                .filter((reservation) => this.canUseWorkspaceActionsForReservation(reservation))
-                .forEach((reservation) => {
-                    const launchBtn = document.getElementById(`launch-${reservation.id}`);
-                    if (launchBtn) {
-                        launchBtn.addEventListener('click', (event) => {
-                            event.stopPropagation();
-                            this.handleLaunchWorkspace(reservation.id);
-                        });
-                    }
-
-                    const openBtn = document.getElementById(`open-${reservation.id}`);
-                    if (openBtn) {
-                        openBtn.addEventListener('click', (event) => {
-                            event.stopPropagation();
-                            this.openWorkspaceForReservation(reservation.id);
-                        });
-                    }
-                });
-        }
-
         this.updateStepIndicators();
         this.reconcileWorkspacePolling();
     }
@@ -1916,7 +1955,12 @@ class ReservationSystem {
         const isAdmin = this.currentUser?.role === 'admin';
         const ownerLabel = reservation.owner || reservation.name || 'Unknown team';
         const reservationState = this.getReservationVisualState(reservation);
-        const reservationStateLabel = reservationState === 'active' ? 'Active now' : 'Upcoming';
+        const reservationStateLabelMap = {
+            active: 'Active now',
+            upcoming: 'Upcoming',
+            inactive: 'Inactive'
+        };
+        const reservationStateLabel = reservationStateLabelMap[reservationState] || 'Upcoming';
         const showWorkspaceActions = this.canUseWorkspaceActionsForReservation(reservation);
         const workspace = this.workspaceStatusByReservation.get(reservation.id) || null;
         const workspaceStatus = String(workspace?.status || '').toLowerCase();

@@ -1,4 +1,5 @@
 const db = require('../db');
+const config = require('../config');
 const { AppError } = require('../utils/errors');
 const { buildHourlySlots, minutesToTime, parseTimeToMinutes } = require('../utils/time');
 
@@ -25,6 +26,10 @@ const temporarilyUnavailablePlatformKeys = new Set(
 
 function isPlatformTemporarilyUnavailable(platformName) {
     return temporarilyUnavailablePlatformKeys.has(normalizePlatformKey(platformName));
+}
+
+function getReservationTimezone() {
+    return normalizeText(config.reservationTimezone) || 'Asia/Shanghai';
 }
 
 async function getPlatformByName(platformName, client = db) {
@@ -356,8 +361,9 @@ async function cleanupExpiredReservations(currentUser) {
 
     const result = await db.query(
         `DELETE FROM reservations
-         WHERE (reservation_date::timestamp + end_time) < NOW()
-         RETURNING id`
+         WHERE (reservation_date::timestamp + end_time) < (NOW() AT TIME ZONE $1)
+         RETURNING id`,
+        [getReservationTimezone()]
     );
 
     return {
@@ -371,11 +377,13 @@ async function getActiveReservationForUser(currentUser, reservationId = '') {
     }
 
     const normalizedReservationId = normalizeText(reservationId);
+    const timezone = getReservationTimezone();
+    const nowExpression = '(NOW() AT TIME ZONE $1)';
     const clauses = [
-        '(r.reservation_date::timestamp + r.start_time) <= NOW()',
-        'NOW() < (r.reservation_date::timestamp + r.end_time)'
+        `(r.reservation_date::timestamp + r.start_time) <= ${nowExpression}`,
+        `${nowExpression} < (r.reservation_date::timestamp + r.end_time)`
     ];
-    const params = [];
+    const params = [timezone];
 
     if (currentUser.role !== 'admin') {
         params.push(currentUser.id);

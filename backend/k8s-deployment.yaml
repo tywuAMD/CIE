@@ -6,6 +6,7 @@ metadata:
 data:
   PORT: "4100"
   CORS_ORIGIN: "http://36.151.243.117:30081"
+  RESERVATION_TIMEZONE: "Asia/Shanghai"
   SESSION_TTL_HOURS: "12"
   SESSION_COOKIE_NAME: "cie_session"
   ONECLICK_BASE_URL: "http://amd-oneclick-manager.default.svc.cluster.local"

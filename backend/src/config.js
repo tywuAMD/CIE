@@ -12,6 +12,7 @@ const config = {
     port: parseNumber(process.env.PORT, 4000),
     databaseUrl: process.env.DATABASE_URL || '',
     corsOrigin: process.env.CORS_ORIGIN || '*',
+    reservationTimezone: process.env.RESERVATION_TIMEZONE || 'Asia/Shanghai',
     sessionTtlHours: parseNumber(process.env.SESSION_TTL_HOURS, 12),
     sessionCookieName: process.env.SESSION_COOKIE_NAME || 'cie_session',
     oneClickBaseUrl: process.env.ONECLICK_BASE_URL || 'http://localhost:8000',

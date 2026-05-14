@@ -40,6 +40,7 @@ If you see `password authentication failed for user "postgres"`, switch to the `
 For OneClick notebook bridge integration, also configure:
 
 ```bash
+RESERVATION_TIMEZONE=Asia/Shanghai
 ONECLICK_BASE_URL=http://localhost:8000
 ONECLICK_BRIDGE_TOKEN=
 ONECLICK_TIMEOUT_MS=15000
