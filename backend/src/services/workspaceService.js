@@ -306,6 +306,7 @@ async function requestWorkspace(currentUser, payload = {}) {
     const reservationId = normalizeReservationId(rawReservationId);
     const image = normalizeText(payload.image);
     const email = normalizeText(currentUser.email).toLowerCase();
+    const ownerUsername = normalizeText(currentUser.username);
 
     if (rawReservationId && !reservationId && currentUser.role === 'admin') {
         throw new AppError(400, 'Invalid reservation identifier. Refresh the page and try again.');
@@ -328,6 +329,7 @@ async function requestWorkspace(currentUser, payload = {}) {
         method: 'POST',
         body: {
             email,
+            ...(ownerUsername ? { owner_username: ownerUsername } : {}),
             ...(reservationEndAt ? { reservation_end_at: reservationEndAt } : {}),
             ...(image ? { image } : {})
         }
