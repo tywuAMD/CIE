@@ -944,6 +944,26 @@ class ReservationSystem {
         return true;
     }
 
+    canTrackWorkspaceForReservation(reservation) {
+        if (!this.currentUser) {
+            return false;
+        }
+
+        if (this.currentUser.role === 'admin') {
+            return this.isReservationOwnedByCurrentUser(reservation);
+        }
+
+        return true;
+    }
+
+    getReservationsForWorkspaceSync() {
+        if (!this.currentUser) {
+            return [];
+        }
+
+        return this.reservations.filter((reservation) => this.canTrackWorkspaceForReservation(reservation));
+    }
+
     getActiveReservationsForWorkspace() {
         if (!this.currentUser) {
             return [];
@@ -965,20 +985,23 @@ class ReservationSystem {
             return;
         }
 
-        const activeReservations = this.getActiveReservationsForWorkspace();
-        const activeIds = new Set(
-            activeReservations
+        const trackedReservations = this.getReservationsForWorkspaceSync();
+        const reservationsToSync = options.fromPolling
+            ? this.getActiveReservationsForWorkspace()
+            : trackedReservations;
+        const trackedIds = new Set(
+            trackedReservations
                 .map((reservation) => this.getValidReservationId(reservation.id))
                 .filter(Boolean)
         );
 
         Array.from(this.workspaceStatusByReservation.keys()).forEach((reservationId) => {
-            if (!activeIds.has(reservationId)) {
+            if (!trackedIds.has(reservationId)) {
                 this.workspaceStatusByReservation.delete(reservationId);
             }
         });
 
-        if (activeReservations.length === 0) {
+        if (reservationsToSync.length === 0) {
             this.stopWorkspacePolling();
             return;
         }
@@ -988,7 +1011,7 @@ class ReservationSystem {
 
         try {
             await Promise.all(
-                activeReservations.map(async (reservation) => {
+                reservationsToSync.map(async (reservation) => {
                     const reservationId = this.getValidReservationId(reservation.id);
                     if (!reservationId) {
                         return;
