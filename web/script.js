@@ -1147,8 +1147,10 @@ class ReservationSystem {
         const validReservationId = this.getValidReservationId(reservationId);
         const workspace = validReservationId ? (this.workspaceStatusByReservation.get(validReservationId) || null) : null;
         const statusMeta = this.getWorkspaceStatusMeta(workspace);
+        const workspaceStatus = String(workspace?.status || '').toLowerCase();
         const isPending = this.isWorkspacePendingStatus(workspace?.status);
         const hasUrl = Boolean(workspace?.url);
+        const canOpen = workspaceStatus === 'ready' && hasUrl;
         const launchLabel = isPending ? 'Launching...' : (workspace ? 'Relaunch Notebook' : 'Launch Notebook');
 
         return `
@@ -1159,7 +1161,7 @@ class ReservationSystem {
                 </div>
                 <div class="workspace-actions">
                     <button type="button" class="workspace-btn launch-btn" id="launch-${reservationId}" data-reservation-id="${reservationId}" ${isPending ? 'disabled' : ''}>${launchLabel}</button>
-                    <button type="button" class="workspace-btn open-btn" id="open-${reservationId}" data-reservation-id="${reservationId}" ${hasUrl ? '' : 'disabled'}>Open Notebook</button>
+                    <button type="button" class="workspace-btn open-btn" id="open-${reservationId}" data-reservation-id="${reservationId}" ${canOpen ? '' : 'disabled'}>Open Notebook</button>
                 </div>
             </div>
         `;
