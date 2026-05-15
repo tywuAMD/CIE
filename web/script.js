@@ -938,7 +938,7 @@ class ReservationSystem {
         }
 
         if (this.currentUser.role === 'admin') {
-            return this.isReservationOwnedByCurrentUser(reservation);
+            return true;
         }
 
         return true;
@@ -950,7 +950,7 @@ class ReservationSystem {
         }
 
         if (this.currentUser.role === 'admin') {
-            return this.isReservationOwnedByCurrentUser(reservation);
+            return true;
         }
 
         return true;

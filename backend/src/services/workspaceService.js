@@ -184,9 +184,6 @@ async function getLatestWorkspaceSession(currentUser, reservationId = '') {
     if (currentUser.role !== 'admin') {
         params.push(currentUser.id);
         clauses.push(`ws.team_id = $${params.length}`);
-    } else if (currentUser.id) {
-        params.push(currentUser.id);
-        clauses.push(`ws.team_id = $${params.length}`);
     }
 
     if (normalizedReservationId) {
